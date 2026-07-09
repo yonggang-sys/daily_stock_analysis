@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 
 import requests
 
@@ -60,10 +60,13 @@ from src.llm.errors import call_litellm_with_param_recovery
 from src.llm.backend_registry import (
     AUTO_AGENT_BACKEND_ID,
     CODEX_CLI_BACKEND_ID,
+    GENERATION_ONLY_BACKEND_IDS,
+    LOCAL_CLI_GENERATION_BACKEND_IDS,
     LITELLM_BACKEND_ID,
     normalize_backend_id,
 )
 from src.llm.generation_params import apply_litellm_generation_params
+from src.llm.local_cli_backend import resolve_local_cli_preset
 from src.notification_contracts import (
     FEISHU_APP_BOT_ENV_GROUP,
     FEISHU_WEBHOOK_ENV_GROUP,
@@ -73,6 +76,8 @@ from src.notification_contracts import (
 from src.notification_noise import validate_notification_timezone
 from src.notification_sender.gotify_sender import resolve_gotify_message_endpoint
 from src.notification_sender.ntfy_sender import resolve_ntfy_endpoint
+from src.services.stock_list_parser import split_stock_list
+from src.services.generation_backend_status_service import GenerationBackendStatusService
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +120,47 @@ class _LLMDiagnostic:
 class SystemConfigService:
     """Service layer for reading, validating, and updating runtime configuration."""
 
+    _GENERATION_BACKEND_STATUS_EXACT_KEYS = {
+        "GENERATION_BACKEND",
+        "GENERATION_FALLBACK_BACKEND",
+        "GENERATION_BACKEND_TIMEOUT_SECONDS",
+        "GENERATION_BACKEND_MAX_OUTPUT_BYTES",
+        "GENERATION_BACKEND_MAX_CONCURRENCY",
+        "LOCAL_CLI_BACKEND_MAX_CONCURRENCY",
+        "OPENCODE_CLI_MODEL",
+        "LITELLM_CONFIG",
+        "LITELLM_MODEL",
+        "LITELLM_FALLBACK_MODELS",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEYS",
+        "GEMINI_MODEL",
+        "GEMINI_MODEL_FALLBACK",
+        "GEMINI_TEMPERATURE",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEYS",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_TEMPERATURE",
+        "ANTHROPIC_MAX_TOKENS",
+        "OPENAI_API_KEY",
+        "OPENAI_API_KEYS",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "OPENAI_VISION_MODEL",
+        "OPENAI_TEMPERATURE",
+        "OLLAMA_API_BASE",
+        "OLLAMA_MODEL",
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_API_KEYS",
+        "AIHUBMIX_KEY",
+        "ANSPIRE_LLM_ENABLED",
+        "ANSPIRE_LLM_BASE_URL",
+        "ANSPIRE_LLM_MODEL",
+        "ANSPIRE_API_KEYS",
+    }
+    _GENERATION_BACKEND_STATUS_LLM_CHANNEL_RE = re.compile(
+        r"^LLM_[A-Z0-9_]+_(PROTOCOL|BASE_URL|API_KEY|API_KEYS|MODELS|EXTRA_HEADERS|ENABLED)$"
+    )
+
     _LLM_CAPABILITY_ORDER: Tuple[str, ...] = ("json", "tools", "stream", "vision")
     _LLM_STREAM_CHUNK_LIMIT = 8
     _WEB_SETTINGS_LLM_CHANNEL_SUPPORT_KEY_RE = re.compile(
@@ -145,6 +191,7 @@ class SystemConfigService:
     }
     _NOTIFICATION_TEST_CHANNELS: Tuple[str, ...] = (
         "wechat",
+        "dingtalk",
         "feishu",
         "telegram",
         "email",
@@ -166,6 +213,9 @@ class SystemConfigService:
         "FEISHU_WEBHOOK_SECRET": ("feishu_webhook_secret", "string"),
         "FEISHU_WEBHOOK_KEYWORD": ("feishu_webhook_keyword", "string"),
         "FEISHU_MAX_BYTES": ("feishu_max_bytes", "int"),
+        "FEISHU_SEND_AS_FILE": ("feishu_send_as_file", "bool"),
+        "DINGTALK_WEBHOOK_URL": ("dingtalk_webhook_url", "string"),
+        "DINGTALK_SECRET": ("dingtalk_secret", "string"),
         "FEISHU_APP_ID": ("feishu_app_id", "string"),
         "FEISHU_APP_SECRET": ("feishu_app_secret", "string"),
         "FEISHU_CHAT_ID": ("feishu_chat_id", "string"),
@@ -204,6 +254,7 @@ class SystemConfigService:
     }
     _NOTIFICATION_REQUIRED_KEY_GROUPS: Dict[str, Tuple[Tuple[str, ...], ...]] = {
         "wechat": (("WECHAT_WEBHOOK_URL",),),
+        "dingtalk": (("DINGTALK_WEBHOOK_URL",),),
         "feishu": (FEISHU_WEBHOOK_ENV_GROUP, FEISHU_APP_BOT_ENV_GROUP),
         "telegram": (("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"),),
         "email": (("EMAIL_SENDER", "EMAIL_PASSWORD"),),
@@ -219,6 +270,7 @@ class SystemConfigService:
     }
     _NOTIFICATION_TEST_TARGET_KEYS: Dict[str, Tuple[str, ...]] = {
         "wechat": ("WECHAT_WEBHOOK_URL",),
+        "dingtalk": ("DINGTALK_WEBHOOK_URL",),
         "feishu": FEISHU_WEBHOOK_ENV_GROUP + FEISHU_APP_BOT_ENV_GROUP,
         "telegram": ("TELEGRAM_BOT_TOKEN",),
         "email": ("EMAIL_RECEIVERS", "EMAIL_SENDER"),
@@ -540,13 +592,77 @@ class SystemConfigService:
             for check in checks
             if check["required"] and check["status"] == "needs_action"
         ]
+        smoke_blocking_missing = [
+            check["key"]
+            for check in checks
+            if check["key"] in {"llm_primary", "stock_list"}
+            and check["status"] == "needs_action"
+        ]
         return {
             "is_complete": not required_missing,
-            "ready_for_smoke": not required_missing,
+            "ready_for_smoke": not smoke_blocking_missing,
             "required_missing_keys": required_missing,
             "next_step_key": required_missing[0] if required_missing else None,
             "checks": checks,
         }
+
+    def get_generation_backend_status(self) -> Dict[str, Any]:
+        """Return cheap generation backend status for saved/runtime config only."""
+        effective_map = self._build_generation_backend_base_map()
+        service = GenerationBackendStatusService(
+            effective_map=effective_map,
+            validation_issues=self._collect_generation_backend_issues_from_map(effective_map),
+        )
+        return service.get_status()
+
+    def preview_generation_backend_status(
+        self,
+        *,
+        items: Sequence[Dict[str, str]],
+        mask_token: str = "******",
+    ) -> Dict[str, Any]:
+        """Return cheap generation backend status for unsaved settings draft."""
+        issues = self._collect_generation_backend_issues(items=items, mask_token=mask_token)
+        errors = [issue for issue in issues if issue["severity"] == "error"]
+        if errors:
+            raise ConfigValidationError(issues=errors)
+        effective_map = self._build_generation_backend_effective_map(
+            items=items,
+            mask_token=mask_token,
+        )
+        service = GenerationBackendStatusService(
+            effective_map=effective_map,
+            validation_issues=issues,
+        )
+        return service.get_status()
+
+    def test_generation_backend(
+        self,
+        *,
+        backend_id: Optional[str] = None,
+        mode: str = "json",
+        items: Sequence[Dict[str, str]] = (),
+        mask_token: str = "******",
+        timeout_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Run an explicit generation backend smoke test without persisting config."""
+        issues = self._collect_generation_backend_issues(items=items, mask_token=mask_token)
+        errors = [issue for issue in issues if issue["severity"] == "error"]
+        if errors:
+            raise ConfigValidationError(issues=errors)
+        effective_map = self._build_generation_backend_effective_map(
+            items=items,
+            mask_token=mask_token,
+        )
+        service = GenerationBackendStatusService(
+            effective_map=effective_map,
+            validation_issues=issues,
+        )
+        return service.smoke_test(
+            backend_id=backend_id,
+            mode=mode,
+            timeout_seconds=timeout_seconds,
+        )
 
     def export_env(self) -> Dict[str, Any]:
         """Return the raw active `.env` content for backup."""
@@ -2229,6 +2345,127 @@ class SystemConfigService:
         issues.extend(self._validate_cross_field(effective_map=effective_map, updated_keys=set(updated_map.keys())))
         return issues
 
+    @classmethod
+    def _is_generation_backend_status_key(cls, key: str) -> bool:
+        normalized = str(key or "").strip().upper()
+        return (
+            normalized in cls._GENERATION_BACKEND_STATUS_EXACT_KEYS
+            or normalized == "LLM_CHANNELS"
+            or bool(cls._GENERATION_BACKEND_STATUS_LLM_CHANNEL_RE.fullmatch(normalized))
+        )
+
+    @classmethod
+    def _filter_generation_backend_items(
+        cls,
+        items: Sequence[Dict[str, str]],
+    ) -> List[Dict[str, str]]:
+        filtered: List[Dict[str, str]] = []
+        for item in items:
+            key = str(item.get("key", "")).strip().upper()
+            if not key or not cls._is_generation_backend_status_key(key):
+                continue
+            filtered.append({"key": key, "value": "" if item.get("value") is None else str(item.get("value"))})
+        return filtered
+
+    def _collect_generation_backend_issues(
+        self,
+        *,
+        items: Sequence[Dict[str, str]],
+        mask_token: str,
+    ) -> List[Dict[str, Any]]:
+        """Collect only config issues that affect generation backend status/smoke."""
+        issues = self._collect_issues(
+            items=self._filter_generation_backend_items(items),
+            mask_token=mask_token,
+        )
+        effective_map = self._build_generation_backend_effective_map(
+            items=items,
+            mask_token=mask_token,
+        )
+        issues.extend(self._validate_generation_backend_litellm_runtime_source(effective_map))
+        return [
+            issue for issue in issues
+            if self._is_generation_backend_status_key(str(issue.get("key", "")))
+        ]
+
+    @staticmethod
+    def _validate_generation_backend_litellm_runtime_source(effective_map: Dict[str, str]) -> List[Dict[str, Any]]:
+        """Validate explicit LiteLLM models when no route list can back them."""
+        primary_backend = normalize_backend_id(
+            effective_map.get("GENERATION_BACKEND"),
+            default=LITELLM_BACKEND_ID,
+        )
+        fallback_backend = (
+            LITELLM_BACKEND_ID
+            if "GENERATION_FALLBACK_BACKEND" not in effective_map
+            else (effective_map.get("GENERATION_FALLBACK_BACKEND") or "").strip().lower()
+        )
+        litellm_selected = (
+            primary_backend == LITELLM_BACKEND_ID
+            or (fallback_backend == LITELLM_BACKEND_ID and primary_backend != LITELLM_BACKEND_ID)
+        )
+        if not litellm_selected:
+            return []
+        if SystemConfigService._uses_litellm_yaml(effective_map):
+            return []
+        if SystemConfigService._collect_llm_channel_models_from_map(effective_map):
+            return []
+        if (effective_map.get("LLM_CHANNELS") or "").strip():
+            return []
+
+        issues: List[Dict[str, Any]] = []
+        primary_model = (effective_map.get("LITELLM_MODEL") or "").strip()
+        if primary_model and not SystemConfigService._has_runtime_source_for_model(primary_model, effective_map):
+            issues.append(
+                {
+                    "key": "LITELLM_MODEL",
+                    "code": "missing_runtime_source",
+                    "message": (
+                        "A primary model is selected, but no usable runtime source was found. "
+                        "Configure a matching provider API key, LLM channel, or LiteLLM YAML route."
+                    ),
+                    "severity": "error",
+                    "expected": "matching provider API key, enabled channel model, or YAML model",
+                    "actual": primary_model,
+                }
+            )
+
+        fallback_models = [
+            model.strip()
+            for model in (effective_map.get("LITELLM_FALLBACK_MODELS") or "").split(",")
+            if model.strip()
+        ]
+        invalid_fallbacks = [
+            model for model in fallback_models
+            if not SystemConfigService._has_runtime_source_for_model(model, effective_map)
+        ]
+        if invalid_fallbacks:
+            issues.append(
+                {
+                    "key": "LITELLM_FALLBACK_MODELS",
+                    "code": "missing_runtime_source",
+                    "message": (
+                        "Some fallback models do not have a matching provider API key, "
+                        "enabled channel, or LiteLLM YAML route."
+                    ),
+                    "severity": "error",
+                    "expected": "matching provider API key, enabled channel model, or YAML model",
+                    "actual": ", ".join(invalid_fallbacks[:3]),
+                }
+            )
+        return issues
+
+    def _collect_generation_backend_issues_from_map(
+        self,
+        effective_map: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
+        items = [
+            {"key": key, "value": value}
+            for key, value in effective_map.items()
+            if self._is_generation_backend_status_key(key)
+        ]
+        return self._collect_generation_backend_issues(items=items, mask_token="******")
+
     @staticmethod
     def _validate_value(key: str, value: str, field_schema: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Validate a single field value against schema metadata."""
@@ -2712,6 +2949,7 @@ class SystemConfigService:
             SlackSender,
             TelegramSender,
             WechatSender,
+            DingtalkSender,
         )
 
         started_at = time.perf_counter()
@@ -2745,6 +2983,7 @@ class SystemConfigService:
 
         dispatch = {
             "wechat": lambda: WechatSender(config).send_to_wechat(titled_content, timeout_seconds=timeout_seconds),
+            "dingtalk": lambda: DingtalkSender(config).send_to_dingtalk(titled_content, title="Test Message", timeout_seconds=timeout_seconds),
             "feishu": lambda: FeishuSender(config).send_to_feishu(titled_content, timeout_seconds=timeout_seconds),
             "telegram": lambda: TelegramSender(config).send_to_telegram(titled_content, timeout_seconds=timeout_seconds),
             "email": lambda: EmailSender(config).send_to_email(content, subject=title, timeout_seconds=timeout_seconds),
@@ -2981,6 +3220,45 @@ class SystemConfigService:
 
         return self._build_display_config_map(effective_map)
 
+    def _build_generation_backend_base_map(self) -> Dict[str, str]:
+        """Build generation backend status config with saved values taking precedence."""
+        saved_map = self._build_display_config_map(self._manager.read_config_map())
+        effective_map = dict(saved_map)
+        registered_keys = {key.upper() for key in get_registered_field_keys()}
+
+        for raw_key, raw_value in os.environ.items():
+            key = str(raw_key).upper()
+            if key in effective_map:
+                continue
+            value = "" if raw_value is None else str(raw_value)
+            if key in registered_keys or self._is_setup_relevant_env_key(key):
+                effective_map[key] = value
+
+        return self._build_display_config_map(effective_map)
+
+    def _build_generation_backend_effective_map(
+        self,
+        *,
+        items: Sequence[Dict[str, str]],
+        mask_token: str,
+    ) -> Dict[str, str]:
+        """Merge saved/runtime config with unsaved status/smoke preview items."""
+        effective_map = self._build_generation_backend_base_map()
+        saved_map = self._build_display_config_map(self._manager.read_config_map())
+
+        for item in self._filter_generation_backend_items(items):
+            key = str(item.get("key", "")).strip().upper()
+            if not key:
+                continue
+            value = "" if item.get("value") is None else str(item.get("value"))
+            field_schema = get_field_definition(key, value)
+            if bool(field_schema.get("is_sensitive", False)) and value == mask_token:
+                if key in saved_map:
+                    continue
+            effective_map[key] = value
+
+        return self._build_display_config_map(effective_map)
+
     @staticmethod
     def _has_any_config_value(effective_map: Dict[str, str], keys: Sequence[str]) -> bool:
         return any((effective_map.get(key) or "").strip() for key in keys)
@@ -3180,15 +3458,16 @@ class SystemConfigService:
             effective_map.get("GENERATION_BACKEND"),
             default=LITELLM_BACKEND_ID,
         )
-        if generation_backend == CODEX_CLI_BACKEND_ID:
-            if shutil.which("codex"):
+        if generation_backend in LOCAL_CLI_GENERATION_BACKEND_IDS:
+            preset = resolve_local_cli_preset(generation_backend)
+            if shutil.which(preset.executable):
                 return self._setup_check(
                     "llm_primary",
                     "LLM 主渠道",
                     "ai_model",
                     True,
                     "configured",
-                    "已启用 Codex CLI 本地生成 Backend（experimental/limited）。",
+                    f"已启用 {preset.display_name} 本地生成 Backend（experimental/limited）。",
                 )
             return self._setup_check(
                 "llm_primary",
@@ -3196,8 +3475,18 @@ class SystemConfigService:
                 "ai_model",
                 True,
                 "needs_action",
-                "已选择 codex_cli，但未找到 codex 可执行文件。",
-                "请先安装并登录 Codex CLI，或将 GENERATION_BACKEND 设回 litellm。",
+                (
+                    "已选择 codex_cli，但 DSA 后端进程当前 PATH 中找不到 codex 可执行文件。"
+                    if generation_backend == CODEX_CLI_BACKEND_ID
+                    else f"已选择 {generation_backend}，但未找到 {preset.executable} 可执行文件。"
+                ),
+                (
+                    "请确认 Codex CLI 已安装到后端 PATH 可见目录；桌面端请完全退出并重开。"
+                    "打开 Codex CLI 交互窗口不会改变已运行后端的 PATH；若找到后仍失败，再检查 Codex CLI 登录态，"
+                    "或将 GENERATION_BACKEND 设回 litellm。"
+                    if generation_backend == CODEX_CLI_BACKEND_ID
+                    else "请先安装并登录对应 CLI，或将 GENERATION_BACKEND 设回 litellm。"
+                ),
             )
 
         model, source = self._resolve_setup_primary_model(effective_map)
@@ -3239,14 +3528,14 @@ class SystemConfigService:
             effective_map.get("AGENT_GENERATION_BACKEND"),
             default=AUTO_AGENT_BACKEND_ID,
         )
-        if agent_backend == CODEX_CLI_BACKEND_ID:
+        if agent_backend in GENERATION_ONLY_BACKEND_IDS:
             return self._setup_check(
                 "llm_agent",
                 "Agent 渠道",
                 "agent",
                 True,
                 "needs_action",
-                "Agent 工具调用暂不支持 codex_cli text-only backend。",
+                f"Agent 工具调用暂不支持 {agent_backend} text-only backend。",
                 "请将 AGENT_GENERATION_BACKEND 设为 auto 或 litellm，并配置 LiteLLM 工具调用渠道。",
             )
 
@@ -3254,16 +3543,28 @@ class SystemConfigService:
         hermes_routes = set(self._collect_hermes_channel_models_from_map(effective_map))
         non_hermes_routes = set(self._collect_non_hermes_channel_models_from_map(effective_map))
         if not agent_model_raw:
-            if generation_backend == CODEX_CLI_BACKEND_ID:
+            if generation_backend in LOCAL_CLI_GENERATION_BACKEND_IDS:
                 litellm_model, _source = self._resolve_setup_primary_model(effective_map)
                 if litellm_model:
+                    if litellm_model in hermes_routes and litellm_model not in non_hermes_routes:
+                        return self._setup_check(
+                            "llm_agent",
+                            "Agent 渠道",
+                            "agent",
+                            True,
+                            "needs_action",
+                            "普通分析使用 Codex CLI；但当前 LiteLLM Agent 路径继承的是 Hermes-only 模型，"
+                            "Hermes Phase 3 不支持 Agent 工具调用。",
+                            "如需使用 Ask-Stock Agent，请配置非 Hermes 的 AGENT_LITELLM_MODEL，"
+                            "或配置包含非 Hermes deployment 的 mixed Agent route。",
+                        )
                     return self._setup_check(
                         "llm_agent",
                         "Agent 渠道",
                         "agent",
                         True,
                         "configured",
-                        "Agent 工具调用将继续使用 LiteLLM 渠道。",
+                        f"普通分析使用 Codex CLI；Agent 工具调用仍使用 LiteLLM 主模型: {litellm_model}",
                     )
                 if agent_backend == LITELLM_BACKEND_ID:
                     return self._setup_check(
@@ -3281,7 +3582,7 @@ class SystemConfigService:
                     "agent",
                     True,
                     "needs_action",
-                    "Agent 工具调用需要 LiteLLM 模型配置；codex_cli 主生成方式不会被自动继承。",
+                    "Agent 工具调用需要 LiteLLM 模型配置；local CLI 主生成方式不会被自动继承。",
                     "如需使用 Ask-Stock Agent，请配置 LiteLLM 模型，或将 AGENT_GENERATION_BACKEND 固定为 litellm 后补齐模型配置。",
                 )
             if primary_check["status"] == "configured":
@@ -3329,6 +3630,11 @@ class SystemConfigService:
                 f"Agent 主模型 {agent_model} 只有 Hermes deployment，Phase 3 不支持 Agent 工具调用。",
                 "请选择非 Hermes Agent 模型，或配置 mixed route 中的非 Hermes deployment。",
             )
+        configured_agent_message = f"已配置 Agent 主模型: {agent_model}"
+        if generation_backend == CODEX_CLI_BACKEND_ID:
+            configured_agent_message = (
+                f"普通分析使用 Codex CLI；Agent 工具调用仍使用 LiteLLM 主模型: {agent_model}"
+            )
         if _uses_direct_env_provider(agent_model):
             return self._setup_check(
                 "llm_agent",
@@ -3336,7 +3642,7 @@ class SystemConfigService:
                 "agent",
                 True,
                 "configured",
-                f"已配置 Agent 主模型: {agent_model}",
+                configured_agent_message,
             )
         if (
             not configured_models
@@ -3348,7 +3654,7 @@ class SystemConfigService:
                 "agent",
                 True,
                 "configured",
-                f"已配置 Agent 主模型: {agent_model}",
+                configured_agent_message,
             )
 
         return self._setup_check(
@@ -3362,7 +3668,7 @@ class SystemConfigService:
         )
 
     def _build_setup_stock_list_check(self, effective_map: Dict[str, str]) -> Dict[str, Any]:
-        stocks = self._split_csv(effective_map.get("STOCK_LIST") or "")
+        stocks = split_stock_list(effective_map.get("STOCK_LIST") or "")
         if stocks:
             return self._setup_check(
                 "stock_list",
@@ -3384,7 +3690,7 @@ class SystemConfigService:
 
     def _build_setup_notification_check(self, effective_map: Dict[str, str]) -> Dict[str, Any]:
         configured = (
-            self._has_any_config_value(effective_map, ("WECHAT_WEBHOOK_URL", "DISCORD_WEBHOOK_URL"))
+            self._has_any_config_value(effective_map, ("WECHAT_WEBHOOK_URL", "DISCORD_WEBHOOK_URL", "DINGTALK_WEBHOOK_URL"))
             or is_feishu_static_env_configured(effective_map)
             or (
                 self._has_any_config_value(effective_map, ("TELEGRAM_BOT_TOKEN",))
@@ -3440,7 +3746,7 @@ class SystemConfigService:
             False,
             "optional",
             "通知为可选项，未配置也不影响首次跑通。",
-            "需要推送时可稍后配置飞书、Telegram、邮件或其他通知渠道。",
+            "需要推送时可稍后配置飞书、钉钉、Telegram、邮件或其他通知渠道。",
         )
 
     def _build_setup_storage_check(self, effective_map: Dict[str, str]) -> Dict[str, Any]:

@@ -76,6 +76,7 @@ const fieldTitleMap: Record<string, string> = {
   BIAS_THRESHOLD: 'BIAS 阈值',
   GENERATION_BACKEND: '分析生成方式',
   GENERATION_FALLBACK_BACKEND: '备用生成方式',
+  OPENCODE_CLI_MODEL: 'OpenCode CLI 模型',
   GENERATION_BACKEND_TIMEOUT_SECONDS: '生成超时（秒）',
   GENERATION_BACKEND_MAX_OUTPUT_BYTES: '最大输出大小（字节）',
   GENERATION_BACKEND_MAX_CONCURRENCY: '模型生成最大并发',
@@ -213,7 +214,7 @@ const fieldTitleMap: Record<string, string> = {
 };
 
 const fieldDescriptionMap: Record<string, string> = {
-  STOCK_LIST: '使用逗号分隔股票代码，例如：600519,300750。',
+  STOCK_LIST: '推荐使用英文逗号分隔股票代码；中文逗号、顿号、分号、空格和换行会在保存后规范为英文逗号。',
   TUSHARE_TOKEN: '用于接入 Tushare Pro 数据服务的凭据。',
   BOCHA_API_KEYS: '用于新闻检索的 Bocha 密钥，支持逗号分隔多个（最高优先级）。',
   TAVILY_API_KEYS: '用于新闻检索的 Tavily 密钥，支持逗号分隔多个。',
@@ -239,9 +240,10 @@ const fieldDescriptionMap: Record<string, string> = {
   PYTDX_PORT: 'Pytdx 单节点端口，需与主机配置配套。',
   PYTDX_SERVERS: 'Pytdx 自定义节点列表，支持 host:port 逗号分隔。',
   BIAS_THRESHOLD: 'BIAS 偏离阈值，超过后用于增强超买超卖提示。',
-  GENERATION_BACKEND: '用于个股分析、大盘复盘和普通文本生成。Codex CLI 需要本机已安装并登录，仍可能调用对应云服务，不是离线模型。',
-  GENERATION_FALLBACK_BACKEND: '本地 Codex 生成失败后的处理方式：禁用表示直接报错，默认模型配置表示再尝试普通模型。',
-  GENERATION_BACKEND_TIMEOUT_SECONDS: '单次生成最多等待多少秒，默认 300；主要用于 Codex CLI 这类本地命令行方式。',
+  GENERATION_BACKEND: '用于个股分析、大盘复盘和普通文本生成。本地 CLI 生成方式需要本机已安装并登录对应 CLI，仍可能调用对应云服务，不是离线模型。',
+  GENERATION_FALLBACK_BACKEND: '本地 CLI 生成失败后的处理方式：禁用表示直接报错，默认模型配置表示再尝试普通模型。',
+  OPENCODE_CLI_MODEL: 'OpenCode CLI 的可选模型覆盖；留空时使用本机 OpenCode 默认模型。认证和模型可用性由本机 OpenCode 配置负责。',
+  GENERATION_BACKEND_TIMEOUT_SECONDS: '单次生成最多等待多少秒，默认 300；主要用于本地 CLI 这类命令行方式。',
   GENERATION_BACKEND_MAX_OUTPUT_BYTES: '单次本地命令行生成可读取的输出大小上限，默认 1048576 字节。',
   GENERATION_BACKEND_MAX_CONCURRENCY: '同时允许多少个模型生成任务运行，默认 1；使用默认模型配置时不改变分析任务线程数。',
   LOCAL_CLI_BACKEND_MAX_CONCURRENCY: '同时允许启动多少个本地命令行生成进程，默认 1；最终不会超过“模型生成最大并发”。',
@@ -412,6 +414,8 @@ const fieldOptionLabelMap: Record<string, Record<string, string>> = {
   GENERATION_BACKEND: {
     litellm: '默认模型配置',
     codex_cli: 'Codex CLI（实验）',
+    claude_code_cli: 'Claude Code CLI（实验）',
+    opencode_cli: 'OpenCode CLI（实验）',
   },
   GENERATION_FALLBACK_BACKEND: {
     '': '禁用',
@@ -420,7 +424,6 @@ const fieldOptionLabelMap: Record<string, Record<string, string>> = {
   AGENT_GENERATION_BACKEND: {
     auto: '自动',
     litellm: '默认模型配置',
-    codex_cli: 'Codex CLI（不支持工具）',
   },
   LOG_LEVEL: {
     debug: '调试',
@@ -489,6 +492,8 @@ const fieldOptionLabelMapEn: Record<string, Record<string, string>> = {
   GENERATION_BACKEND: {
     litellm: 'Default model settings',
     codex_cli: 'Codex CLI (experimental)',
+    claude_code_cli: 'Claude Code CLI (experimental)',
+    opencode_cli: 'OpenCode CLI (experimental)',
   },
   GENERATION_FALLBACK_BACKEND: {
     '': 'Disabled',
@@ -497,7 +502,6 @@ const fieldOptionLabelMapEn: Record<string, Record<string, string>> = {
   AGENT_GENERATION_BACKEND: {
     auto: 'Auto',
     litellm: 'Default model settings',
-    codex_cli: 'Codex CLI (tools unsupported)',
   },
   LOG_LEVEL: {
     debug: 'Debug',

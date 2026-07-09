@@ -258,5 +258,119 @@ class TestStructureRobustness(unittest.TestCase):
             self.assertIsNone(_fetcher().get_institutional_net("3105.TWO"))
 
 
+class TestConcurrencyAndHttpError(unittest.TestCase):
+    """Cache-stampede guard: concurrent same-key callers coalesce into one upstream
+    fetch (protects the T86 ~3 req/5 s budget); HTTP errors fail open."""
+
+    def test_concurrent_same_key_coalesces_to_single_fetch(self):
+        import threading
+        import time as _t
+        calls = []
+        barrier = threading.Barrier(8)
+
+        def slow_get(*a, **k):
+            calls.append(1)
+            _t.sleep(0.05)   # window for the other threads to pile up on the key lock
+            return _resp(T86_FIXTURE)
+
+        f = _fetcher()
+
+        def caller():
+            barrier.wait()   # release all 8 threads together so they truly race
+            f.get_institutional_net("2330.TW", "20260626")
+
+        with patch("data_provider.tw_institutional_fetcher.requests.get", side_effect=slow_get):
+            threads = [threading.Thread(target=caller) for _ in range(8)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+        self.assertEqual(len(calls), 1)   # 8 concurrent same-key callers -> ONE fetch
+
+    def test_different_keys_are_not_coalesced(self):
+        with patch("data_provider.tw_institutional_fetcher.requests.get", return_value=_resp(T86_FIXTURE)) as mock_get:
+            f = _fetcher()
+            f.get_institutional_net("2330.TW", "20260626")
+            f.get_institutional_net("2330.TW", "20260625")   # different date -> different key
+            self.assertEqual(mock_get.call_count, 2)
+
+    def test_http_error_fails_open(self):
+        import requests as _rq
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = _rq.HTTPError("429 Too Many Requests")
+        with patch("data_provider.tw_institutional_fetcher.requests.get", return_value=resp):
+            self.assertIsNone(_fetcher().get_institutional_net("2330.TW", "20260626"))
+
+
+class TestCircuitBreakerAndDateGuard(unittest.TestCase):
+    """C1 circuit breaker (skip-fast fail-open when an endpoint is down) + C2 TPEx date guard."""
+
+    def test_circuit_breaker_opens_after_3_failures_and_skips_fetch(self):
+        import requests as _rq
+        from data_provider.realtime_types import CircuitBreaker
+
+        f = _fetcher()
+        with patch(
+            "data_provider.tw_institutional_fetcher.requests.get",
+            side_effect=_rq.ConnectionError("down"),
+        ) as mock_get:
+            for _ in range(3):  # 3 consecutive failures trip the breaker
+                self.assertIsNone(f.get_institutional_net("2330.TW"))
+            self.assertEqual(mock_get.call_count, 3)
+            # breaker now OPEN -> the 4th call must skip the network round-trip entirely
+            self.assertIsNone(f.get_institutional_net("2330.TW"))
+            self.assertEqual(mock_get.call_count, 3, "breaker did not skip the fetch when open")
+        self.assertEqual(f._breaker.get_status().get("twse"), CircuitBreaker.OPEN)
+
+    def test_circuit_breaker_recovers_after_cooldown_reset(self):
+        import requests as _rq
+        from data_provider.realtime_types import CircuitBreaker
+
+        f = _fetcher()
+        with patch(
+            "data_provider.tw_institutional_fetcher.requests.get",
+            side_effect=_rq.ConnectionError("down"),
+        ):
+            for _ in range(3):
+                f.get_institutional_net("2330.TW")
+        self.assertEqual(f._breaker.get_status().get("twse"), CircuitBreaker.OPEN)
+        f._breaker.reset("twse")  # simulate the ~5 min cooldown elapsing / recovery
+        with patch("data_provider.tw_institutional_fetcher.requests.get", return_value=_resp(T86_FIXTURE)):
+            rec = f.get_institutional_net("2330.TW")
+        self.assertIsNotNone(rec)
+        self.assertEqual(f._breaker.get_status().get("twse"), CircuitBreaker.CLOSED)
+
+    def test_empty_responses_do_not_trip_breaker(self):
+        # an empty / non-trading-day response means the endpoint RESPONDED -> reachable,
+        # so the breaker must stay CLOSED and keep fetching (never skip a recovered day).
+        from data_provider.realtime_types import CircuitBreaker
+
+        f = _fetcher()
+        empty = {"stat": "OK", "data": []}
+        with patch("data_provider.tw_institutional_fetcher.requests.get", return_value=_resp(empty)) as mock_get:
+            for _ in range(3):
+                self.assertIsNone(f.get_institutional_net("2330.TW"))
+            self.assertEqual(mock_get.call_count, 3, "an empty response wrongly tripped/skipped the breaker")
+        self.assertEqual(f._breaker.get_status().get("twse"), CircuitBreaker.CLOSED)
+
+    def test_tpex_explicit_date_match_returns_record(self):
+        with patch("data_provider.tw_institutional_fetcher.requests.get", return_value=_resp(TPEX_FIXTURE)):
+            rec = _fetcher().get_institutional_net("3105.TWO", "20260626")  # == served trading day
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["date"], "20260626")
+
+    def test_tpex_explicit_date_mismatch_fails_open(self):
+        # TPEx serves only the latest day; a mismatched explicit date must not return a
+        # wrong-day record -> fail open (None).
+        with patch("data_provider.tw_institutional_fetcher.requests.get", return_value=_resp(TPEX_FIXTURE)):
+            rec = _fetcher().get_institutional_net("3105.TWO", "20260101")
+        self.assertIsNone(rec)
+
+    def test_tpex_no_date_returns_latest(self):
+        with patch("data_provider.tw_institutional_fetcher.requests.get", return_value=_resp(TPEX_FIXTURE)):
+            rec = _fetcher().get_institutional_net("3105.TWO")  # no date -> latest, guard inactive
+        self.assertIsNotNone(rec)
+
+
 if __name__ == "__main__":
     unittest.main()

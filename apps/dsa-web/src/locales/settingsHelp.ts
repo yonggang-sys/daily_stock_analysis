@@ -18,7 +18,7 @@ const settingsHelpZhCN: SettingsHelpMap = {
   'settings.base.STOCK_LIST': {
     title: '自选股列表',
     summary: '配置需要分析的股票代码列表，是手动分析、定时任务和通知报告的基础输入。',
-    usage: '多个股票代码使用英文逗号分隔。A 股可直接填写 6 位代码，港股可使用 hk 前缀，美股可填写 ticker。',
+    usage: '多个股票代码推荐使用英文逗号分隔；从表格或聊天中粘贴时，也会识别中文逗号、顿号、分号、空格和换行，并在保存后规范为英文逗号。',
     valueNotes: [
       '定时模式每次触发前会重新读取当前保存的 STOCK_LIST。',
       '如果命令行临时传入 --stocks，只影响本次手动运行，不会锁定后续计划任务。',
@@ -28,7 +28,7 @@ const settingsHelpZhCN: SettingsHelpMap = {
       '影响主分析任务、市场报告中的个股范围、通知推送内容和历史报告记录。',
     ],
     notes: [
-      '股票代码之间不要使用中文逗号。',
+      '保存后的 STOCK_LIST 会统一写成英文逗号分隔。',
       '修改后保存配置即可供后续任务读取。',
     ],
   },
@@ -36,15 +36,15 @@ const settingsHelpZhCN: SettingsHelpMap = {
     title: '分析生成方式',
     showFieldKey: false,
     summary: '决定系统用哪种方式生成个股分析、大盘复盘和普通文本回复。',
-    usage: '通常保持“默认模型配置”。只有在本机已安装并登录 Codex CLI，且你信任它处理分析内容时，才选择 Codex CLI（实验）。',
+    usage: '通常保持“默认模型配置”。只有在本机已安装并登录对应 CLI，且你信任它处理分析内容时，才选择本地 CLI 生成方式（实验）。',
     valueNotes: [
-      'Codex CLI 是本机启动的命令行程序，不等于离线模型；它背后的服务可能处理股票代码、新闻、持仓上下文、分析请求和报告草稿。',
-      'Docker、云服务器、CI 不天然拥有你本机的登录状态；DSA 不读取 Codex 登录凭据文件，但 Codex CLI 自己可能使用它的登录状态。',
+      '本地 CLI 生成方式是本机启动的命令行程序，不等于离线模型；背后的服务可能处理股票代码、新闻、持仓上下文、分析请求和报告草稿。',
+      'Docker、云服务器、CI 不天然拥有你本机的登录状态；DSA 不读取 Codex/Claude/OpenCode 登录凭据文件，但对应 CLI 自己可能使用它的登录状态。',
     ],
     impact: ['影响普通分析、大盘复盘和文本生成入口，不改变问股助手的工具执行规则。'],
     notes: [
       '想恢复默认行为，选择“默认模型配置”并保存配置。',
-      'Codex CLI 当前仍是实验能力；如果输出不稳定或经常失败，请设回默认模型配置。',
+      '本地 CLI 生成方式当前仍是实验能力；如果输出不稳定或经常失败，请设回默认模型配置。',
       '默认模型配置会继续使用现有 API Key、模型渠道和备用模型设置。',
     ],
     examples: [],
@@ -52,7 +52,7 @@ const settingsHelpZhCN: SettingsHelpMap = {
   'settings.ai_model.GENERATION_FALLBACK_BACKEND': {
     title: '备用生成方式',
     showFieldKey: false,
-    summary: '决定本地 Codex 生成失败后，是直接报错，还是再尝试默认模型配置。',
+    summary: '决定本地 CLI 生成失败后，是直接报错，还是再尝试默认模型配置。',
     usage: '选择“禁用”表示失败就报错；选择“默认模型配置”表示再尝试你已经配置好的普通模型。',
     valueNotes: [
       '如果只是想设置主模型失败后的备用模型，请使用“备选模型”，不是这个字段。',
@@ -60,14 +60,26 @@ const settingsHelpZhCN: SettingsHelpMap = {
     ],
     impact: ['不改变现有备用模型顺序，也不会影响渠道编辑器里的模型配置。'],
     notes: [
-      '希望本地 Codex 失败后立刻暴露错误时选择“禁用”；希望继续尝试云端模型时选择“默认模型配置”。',
+      '希望本地 CLI 失败后立刻暴露错误时选择“禁用”；希望继续尝试云端模型时选择“默认模型配置”。',
     ],
     examples: [],
+  },
+  'settings.ai_model.OPENCODE_CLI_MODEL': {
+    title: 'OpenCode CLI 模型',
+    showFieldKey: true,
+    summary: '可选：指定 DSA 调用 OpenCode run 时传给 --model 的模型名。',
+    usage: '仅在“分析生成方式”选择 OpenCode CLI 时生效。留空时 DSA 不传 --model，使用你本机 OpenCode 的默认模型配置。',
+    valueNotes: [
+      '模型是否可用、如何认证由你本机的 OpenCode 配置负责。',
+      '配置时该值会作为单个 argv 参数传给 OpenCode，不能包含空白或 shell 元字符。',
+    ],
+    impact: ['影响普通分析、大盘复盘和文本生成的 OpenCode CLI 调用，不影响问股助手。'],
+    examples: ['OPENCODE_CLI_MODEL=provider/model'],
   },
   'settings.ai_model.GENERATION_BACKEND_TIMEOUT_SECONDS': {
     title: '生成超时（秒）',
     summary: '限制一次模型生成最多等待多久。',
-    usage: '默认 300 秒，主要用于 Codex CLI 这类本地命令行生成方式。',
+    usage: '默认 300 秒，主要用于本地 CLI 这类命令行生成方式。',
     valueNotes: ['超时后会停止本次生成，并在日志里记录明确的超时错误。'],
   },
   'settings.ai_model.GENERATION_BACKEND_MAX_OUTPUT_BYTES': {
@@ -79,13 +91,13 @@ const settingsHelpZhCN: SettingsHelpMap = {
   'settings.ai_model.GENERATION_BACKEND_MAX_CONCURRENCY': {
     title: '模型生成最大并发',
     summary: '限制同时进行的模型生成任务数量。',
-    usage: '默认 1。使用 Codex CLI 时，实际并发还会受“本地命令行最大并发”限制。',
+    usage: '默认 1。使用本地 CLI 生成方式时，实际并发还会受“本地命令行最大并发”限制。',
     valueNotes: ['使用默认模型配置时，这个字段不会改变分析任务线程数。'],
   },
   'settings.ai_model.LOCAL_CLI_BACKEND_MAX_CONCURRENCY': {
     title: '本地命令行最大并发',
     summary: '限制同时启动多少个本地命令行生成进程。',
-    usage: '默认 1，避免同时启动多个 Codex CLI 进程导致机器变慢或输出互相干扰。',
+    usage: '默认 1，避免同时启动多个本地 CLI 进程导致机器变慢或输出互相干扰。',
     valueNotes: ['最终并发不会超过“模型生成最大并发”。'],
   },
   'settings.ai_model.LITELLM_MODEL': {
@@ -558,7 +570,7 @@ const settingsHelpZhCN: SettingsHelpMap = {
     summary: '控制 WebUI 服务绑定在哪个网络地址上。',
     usage: '本机访问通常使用 127.0.0.1；云服务器、Docker 或需要外部访问时通常使用 0.0.0.0。',
     valueNotes: [
-      '当前启动逻辑会在 host 为默认 0.0.0.0 时读取 WEBUI_HOST；即使显式传入 --host 0.0.0.0，也可能被 .env 中的 WEBUI_HOST 覆盖。',
+      '启动时显式传入的 --host 会优先生效；若未传 --host，则会使用运行时配置中的 WEBUI_HOST（或其默认值）。',
       '在设置页保存后，只会写入 .env 并重载运行时配置对象，不会让当前 WebUI/API 进程重新绑定监听地址。',
       'Docker Compose 中通常会在容器内使用 0.0.0.0，宿主机访问还取决于端口映射。',
     ],
@@ -576,6 +588,7 @@ const settingsHelpZhCN: SettingsHelpMap = {
     summary: '控制 WebUI 服务监听的端口。',
     usage: '本地默认 8000；如端口冲突可改为其他 1-65535 范围内端口。',
     valueNotes: [
+      '启动时显式传入的 --port 会优先生效；若未传 --port，则会使用运行时配置中的 WEBUI_PORT（或其默认值）。',
       'Docker 或云服务器访问还取决于宿主机端口映射和安全组。',
       '设置页保存只会写入 .env，不会让当前 WebUI/API 进程重新绑定端口。',
     ],
@@ -798,7 +811,7 @@ const settingsHelpZhCN: SettingsHelpMap = {
     valueNotes: [
       '如果不确定，选择“自动”即可。',
       '只有当你明确要固定使用普通模型配置时，才改为“默认模型配置”。',
-      'Codex CLI 当前不能直接用于问股助手的数据工具调用；显式选择后会提示不可用，或按配置改用普通模型配置。',
+      '本地 CLI 生成方式当前不能直接用于问股助手的数据工具调用；显式选择后会提示不可用，或按配置改用普通模型配置。',
     ],
     impact: ['影响问股助手的回复生成和工具调用入口，不改变它能使用哪些工具。'],
     notes: [
@@ -1187,28 +1200,28 @@ const settingsHelpEnUS: SettingsHelpMap = {
   'settings.base.STOCK_LIST': {
     title: 'Watchlist',
     summary: 'Defines the stock codes used by analysis jobs and notification reports.',
-    usage: 'Separate symbols with commas. A-shares can use six-digit codes, HK stocks can use the hk prefix, and US stocks can use ticker symbols.',
+    usage: 'English commas are recommended. Pasted Chinese commas, enumeration commas, semicolons, spaces, and newlines are also recognized and normalized to English commas when saved.',
     valueNotes: [
       'Scheduled mode rereads the saved STOCK_LIST before each run.',
       'A temporary --stocks argument only affects that manual run.',
       'STOCK_GROUP_N should be a subset of STOCK_LIST and only affects grouped email routing.',
     ],
     impact: ['Affects analysis scope, notification content, and saved history reports.'],
-    notes: ['Use English commas between symbols.', 'Save the setting before later tasks can read it.'],
+    notes: ['Saved STOCK_LIST values are written with English commas.', 'Save the setting before later tasks can read it.'],
   },
   'settings.ai_model.GENERATION_BACKEND': {
     title: 'Analysis Generation Method',
     showFieldKey: false,
     summary: 'Chooses how the system generates stock analysis, market reviews, and regular text responses.',
-    usage: 'Usually keep Default model settings. Choose Codex CLI only when it is installed and logged in on this machine and you trust it to handle analysis content.',
+    usage: 'Usually keep Default model settings. Choose a local CLI backend only when the corresponding CLI is installed and logged in on this machine and you trust it to handle analysis content.',
     valueNotes: [
-      'Codex CLI is a local command-line program, not an offline model. The service behind it may process stock symbols, news, position context, analysis requests, and report drafts.',
-      'Docker, cloud servers, and CI do not automatically have your local login state. DSA does not read Codex login credential files, but Codex CLI itself may use its login state.',
+      'Local CLI backends are local command-line programs, not offline models. The service behind them may process stock symbols, news, position context, analysis requests, and report drafts.',
+      'Docker, cloud servers, and CI do not automatically have your local login state. DSA does not read Codex/Claude/OpenCode credential files, but the corresponding CLI itself may use its login state.',
     ],
     impact: ['Affects regular analysis, market review, and text generation entry points. It does not change how the ask-stock assistant runs tools.'],
     notes: [
       'To restore the default behavior, choose “Default model settings” and save.',
-      'Codex CLI is still experimental. If output is unstable or failures are frequent, switch back to Default model settings.',
+      'Local CLI backends are still experimental. If output is unstable or failures are frequent, switch back to Default model settings.',
       'Default model settings continue to use your existing API keys, model channels, and fallback model settings.',
     ],
     examples: [],
@@ -1216,22 +1229,34 @@ const settingsHelpEnUS: SettingsHelpMap = {
   'settings.ai_model.GENERATION_FALLBACK_BACKEND': {
     title: 'Fallback Generation Method',
     showFieldKey: false,
-    summary: 'Chooses whether a failed local Codex generation should stop with an error or try Default model settings next.',
+    summary: 'Chooses whether a failed local CLI generation should stop with an error or try Default model settings next.',
     usage: 'Disabled means the local failure is returned immediately. Default model settings means the system tries your configured regular model next.',
     valueNotes: [
-      'Use fallback models for model-to-model fallback; this field only handles local Codex versus Default model settings.',
+      'Use fallback models for model-to-model fallback; this field only handles local CLI backends versus Default model settings.',
       'When the primary generation method is already Default model settings, this field has no extra effect.',
     ],
     impact: ['Affects local CLI failure handling for stock analysis, market review, and free-form text generation.'],
     notes: [
-      'Choose Disabled when you want local Codex failures to be visible immediately, or Default model settings when cloud model recovery is acceptable.',
+      'Choose Disabled when you want local CLI failures to be visible immediately, or Default model settings when cloud model recovery is acceptable.',
     ],
     examples: [],
+  },
+  'settings.ai_model.OPENCODE_CLI_MODEL': {
+    title: 'OpenCode CLI Model',
+    showFieldKey: true,
+    summary: 'Optional model name passed to OpenCode run through --model.',
+    usage: 'Only applies when Analysis Generation Method is OpenCode CLI. Leave it empty and DSA will not pass --model, so OpenCode uses its local default model configuration.',
+    valueNotes: [
+      'Model availability and authentication are handled by your local OpenCode setup.',
+      'When set, the value is passed as one argv token and must not contain whitespace or shell metacharacters.',
+    ],
+    impact: ['Affects regular analysis, market review, and text generation through OpenCode CLI. It does not affect the ask-stock assistant.'],
+    examples: ['OPENCODE_CLI_MODEL=provider/model'],
   },
   'settings.ai_model.GENERATION_BACKEND_TIMEOUT_SECONDS': {
     title: 'Generation Timeout (Seconds)',
     summary: 'Limits how long one model generation may wait.',
-    usage: 'Default is 300 seconds. This mainly applies to local command-line generation such as Codex CLI.',
+    usage: 'Default is 300 seconds. This mainly applies to local CLI generation.',
     valueNotes: ['Timeout stops the generation and records a clear timeout error.'],
   },
   'settings.ai_model.GENERATION_BACKEND_MAX_OUTPUT_BYTES': {
@@ -1243,13 +1268,13 @@ const settingsHelpEnUS: SettingsHelpMap = {
   'settings.ai_model.GENERATION_BACKEND_MAX_CONCURRENCY': {
     title: 'Model Generation Max Concurrency',
     summary: 'Limits how many model generation jobs may run at the same time.',
-    usage: 'Default is 1. When using Codex CLI, actual concurrency is also limited by Local Command Max Concurrency.',
+    usage: 'Default is 1. When using local CLI backends, actual concurrency is also limited by Local Command Max Concurrency.',
     valueNotes: ['When using Default model settings, this does not change the number of analysis worker tasks.'],
   },
   'settings.ai_model.LOCAL_CLI_BACKEND_MAX_CONCURRENCY': {
     title: 'Local Command Max Concurrency',
     summary: 'Limits how many local command-line generation processes may run at the same time.',
-    usage: 'Default is 1 to avoid starting multiple Codex CLI processes at once and slowing the machine down.',
+    usage: 'Default is 1 to avoid starting multiple local CLI processes at once and slowing the machine down.',
     valueNotes: ['Final concurrency never exceeds Model Generation Max Concurrency.'],
   },
   'settings.ai_model.LITELLM_MODEL': {
@@ -1689,7 +1714,7 @@ const settingsHelpEnUS: SettingsHelpMap = {
     summary: 'Controls the network address the WebUI service binds to.',
     usage: 'Use 127.0.0.1 for local-only access. Use 0.0.0.0 for cloud, Docker, or external access.',
     valueNotes: [
-      'Current startup logic reads WEBUI_HOST when the host is the default 0.0.0.0; even an explicit --host 0.0.0.0 can still be overwritten by WEBUI_HOST in .env.',
+      'An explicit --host has higher priority at startup; if --host is not provided, runtime-configured WEBUI_HOST (or its default) is used.',
       'Saving it from the settings page writes .env and reloads runtime config objects, but the running WebUI/API process will not rebind its host.',
       'Docker Compose commonly binds 0.0.0.0 inside the container; host access also depends on port mapping.',
     ],
@@ -1705,6 +1730,7 @@ const settingsHelpEnUS: SettingsHelpMap = {
     summary: 'Controls the port the WebUI service listens on.',
     usage: 'Default is 8000. Use another port in the 1-65535 range when needed.',
     valueNotes: [
+      'An explicit --port has higher priority at startup; if --port is not provided, runtime-configured WEBUI_PORT (or its default) is used.',
       'Docker or cloud access also depends on host port mappings and firewall rules.',
       'Saving from the settings page only writes .env; it does not rebind the running WebUI/API process.',
     ],
@@ -1921,7 +1947,7 @@ const settingsHelpEnUS: SettingsHelpMap = {
     valueNotes: [
       'If you are unsure, choose Auto.',
       'Choose “Default model settings” only when you explicitly want to pin the assistant to the regular model configuration.',
-      'Codex CLI cannot directly run ask-stock assistant data-tool calls right now; explicit manual configuration reports the capability as unavailable.',
+      'Local CLI backends cannot directly run ask-stock assistant data-tool calls right now; explicit manual configuration reports the capability as unavailable.',
     ],
     impact: ['Affects the assistant reply path and tool entry point. It does not change which tools the assistant can use.'],
     notes: [

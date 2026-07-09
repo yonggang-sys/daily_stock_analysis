@@ -154,7 +154,7 @@ class BacktestService:
                 )
 
                 if len(forward_bars) < int(eval_window_days):
-                    for fill_code in self._ordered_candidate_codes(
+                    for fill_code in self._ordered_daily_refill_codes(
                         code_candidates=daily_code_candidates,
                         preferred_code=matched_daily_code,
                     ):
@@ -495,6 +495,33 @@ class BacktestService:
             return [normalized_preferred] + [code for code in ordered if code != normalized_preferred]
         return ordered
 
+    @staticmethod
+    def _normalize_daily_refill_code(code: Optional[str]) -> str:
+        raw_code = str(code or "").strip()
+        if not raw_code:
+            return ""
+        return canonical_stock_code(normalize_stock_code(raw_code))
+
+    @staticmethod
+    def _ordered_daily_refill_codes(
+        *,
+        code_candidates: List[str],
+        preferred_code: Optional[str] = None,
+    ) -> List[str]:
+        ordered = BacktestService._ordered_candidate_codes(
+            code_candidates=code_candidates,
+            preferred_code=preferred_code,
+        )
+        refill_codes: List[str] = []
+        seen: set[str] = set()
+        for code in ordered:
+            refill_code = BacktestService._normalize_daily_refill_code(code)
+            if not refill_code or refill_code in seen:
+                continue
+            seen.add(refill_code)
+            refill_codes.append(refill_code)
+        return refill_codes
+
     def _get_forward_bars_by_candidates(
         self,
         *,
@@ -624,7 +651,7 @@ class BacktestService:
             limit=limit,
         )
         items = []
-        for result, stock_name, trend_prediction, _created_at, context_snapshot, raw_result, report_type in rows:
+        for result, stock_name, trend_prediction, _created_at, context_snapshot, raw_result, report_type, analysis_sentiment_score in rows:
             summary = extract_market_phase_summary(context_snapshot)
             items.append(
                 self._result_to_dict(
@@ -635,6 +662,7 @@ class BacktestService:
                     market_phase=self._phase_bucket_from_summary(summary),
                     raw_result=raw_result,
                     report_type=report_type,
+                    analysis_sentiment_score=analysis_sentiment_score,
                 )
             )
         return {"total": total, "page": page, "limit": limit, "items": items}
@@ -807,6 +835,7 @@ class BacktestService:
                 str,
                 Optional[str],
                 Optional[str],
+                Optional[int],
             ]
         ] = []
 
@@ -839,13 +868,14 @@ class BacktestService:
                 context_snapshot,
                 raw_result,
                 report_type,
+                analysis_sentiment_score,
             ) in batch:
                 summary = extract_market_phase_summary(context_snapshot)
                 bucket = self._phase_bucket_from_summary(summary)
                 if bucket != phase_bucket:
                     continue
                 if matched_total >= page_offset and len(page_rows) < limit:
-                    page_rows.append((result, stock_name, trend_prediction, summary, bucket, raw_result, report_type))
+                    page_rows.append((result, stock_name, trend_prediction, summary, bucket, raw_result, report_type, analysis_sentiment_score))
                 matched_total += 1
             if len(batch) < batch_limit:
                 break
@@ -859,8 +889,9 @@ class BacktestService:
                 market_phase=bucket,
                 raw_result=raw_result,
                 report_type=report_type,
+                analysis_sentiment_score=analysis_sentiment_score,
             )
-            for result, stock_name, trend_prediction, summary, bucket, raw_result, report_type in page_rows
+            for result, stock_name, trend_prediction, summary, bucket, raw_result, report_type, analysis_sentiment_score in page_rows
         ]
         return {"total": matched_total, "page": page, "limit": limit, "items": items}
 
@@ -908,6 +939,10 @@ class BacktestService:
         return None
 
     def _try_fill_daily_data(self, *, code: str, analysis_date: date, eval_window_days: int) -> None:
+        refill_code = self._normalize_daily_refill_code(code)
+        if not refill_code:
+            return
+
         try:
             from data_provider.base import DataFetcherManager
 
@@ -915,16 +950,16 @@ class BacktestService:
             end_date = analysis_date + timedelta(days=max(eval_window_days * 2, 30))
             manager = DataFetcherManager()
             df, source = manager.get_daily_data(
-                stock_code=code,
+                stock_code=refill_code,
                 start_date=analysis_date.strftime("%Y-%m-%d"),
                 end_date=end_date.strftime("%Y-%m-%d"),
                 days=eval_window_days * 2,
             )
             if df is None or df.empty:
                 return
-            self.db.save_daily_data(df, code=code, data_source=source)
+            self.db.save_daily_data(df, code=refill_code, data_source=source)
         except Exception as exc:
-            logger.warning(f"补全日线数据失败({code}): {exc}")
+            logger.warning(f"补全日线数据失败({refill_code}): {exc}")
 
     def _recompute_summaries(self, *, touched_codes: List[str], eval_window_days: int, engine_version: str) -> None:
         with self.db.get_session() as session:
@@ -1010,6 +1045,7 @@ class BacktestService:
         market_phase: Optional[str] = None,
         raw_result: Optional[Any] = None,
         report_type: Optional[str] = None,
+        analysis_sentiment_score: Optional[int] = None,
     ) -> Dict[str, Any]:
         parsed_raw_result = parse_json_field(raw_result)
         raw = parsed_raw_result if isinstance(parsed_raw_result, dict) else {}
@@ -1018,6 +1054,13 @@ class BacktestService:
             explicit_action=raw.get("action"),
             report_type=report_type or ("market_review" if row.code == "market_review" else None),
             report_language=raw.get("report_language"),
+            sentiment_score=(
+                raw.get("sentiment_score")
+                if raw.get("sentiment_score") is not None
+                else analysis_sentiment_score
+            ),
+            guardrail_reason=raw.get("guardrail_reason") or raw.get("downgrade_reason"),
+            align_with_score=True,
         )
         return {
             "analysis_history_id": row.analysis_history_id,

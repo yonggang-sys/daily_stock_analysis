@@ -30,6 +30,7 @@ BacktestResultContextRow = Tuple[
     Optional[str],
     Optional[str],
     Optional[str],
+    Optional[int],
 ]
 
 
@@ -211,6 +212,7 @@ class BacktestRepository:
                     AnalysisHistory.context_snapshot,
                     AnalysisHistory.raw_result,
                     AnalysisHistory.report_type,
+                    AnalysisHistory.sentiment_score,
                 )
                 .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
                 .where(where_clause)
@@ -252,6 +254,7 @@ class BacktestRepository:
                     AnalysisHistory.context_snapshot,
                     AnalysisHistory.raw_result,
                     AnalysisHistory.report_type,
+                    AnalysisHistory.sentiment_score,
                 )
                 .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
                 .where(where_clause)

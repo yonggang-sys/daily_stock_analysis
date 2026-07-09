@@ -53,7 +53,18 @@ MARKET_TIMEZONE = {
 # P0 market phase baseline (Issue #1386). This is an intentionally small
 # regular-session inference layer; it does not change existing fail-open
 # trading-day filtering or effective-date behavior.
-_CLOSING_AUCTION_WINDOW_MINUTES = {"cn": 3, "hk": 10, "us": 5}
+# tw: TWSE/TPEx run a 13:25-13:30 closing call auction (5 min). JP/KR use
+# regular-session closing auction windows before the 15:30 close (JP 5 min,
+# KR 10 min). Without an entry here .get(market, 0) yields a zero-width
+# window, so the last regular-session minutes stay INTRADAY until POSTMARKET.
+_CLOSING_AUCTION_WINDOW_MINUTES = {
+    "cn": 3,
+    "hk": 10,
+    "us": 5,
+    "jp": 5,
+    "kr": 10,
+    "tw": 5,
+}
 _SUPPORTED_ANALYSIS_PHASES = {
     "auto",
     "premarket",

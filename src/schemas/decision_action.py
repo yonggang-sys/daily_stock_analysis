@@ -12,6 +12,7 @@ import re
 from typing import Any, Dict, Literal, Optional, TypedDict, get_args
 
 from src.report_language import normalize_report_language
+from src.schemas.decision_scale import action_for_score, score_action_conflicts_without_guardrail
 
 DecisionAction = Literal["buy", "add", "hold", "reduce", "sell", "watch", "avoid", "alert"]
 
@@ -346,6 +347,8 @@ def normalize_decision_action(value: Any) -> Optional[DecisionAction]:
 
     if len(matches) == 1:
         return next(iter(matches))
+    if matches and matches <= {"hold", "watch"}:
+        return "watch" if "watch" in matches else "hold"
     return None
 
 
@@ -364,6 +367,9 @@ def build_action_fields(
     explicit_action: Any = None,
     report_type: Any = None,
     report_language: Optional[str] = "zh",
+    sentiment_score: Any = None,
+    guardrail_reason: Any = None,
+    align_with_score: bool = False,
 ) -> DecisionActionFields:
     """Build optional public action fields without mutating legacy contracts."""
 
@@ -375,6 +381,15 @@ def build_action_fields(
         advice_text = str(operation_advice or "").strip()
         if advice_text:
             action = normalize_decision_action(advice_text)
+
+    if align_with_score and score_action_conflicts_without_guardrail(
+        score=sentiment_score,
+        action=action,
+        guardrail_reason=guardrail_reason,
+    ):
+        score_action = action_for_score(sentiment_score)
+        if score_action in _ACTION_VALUES:
+            action = score_action  # type: ignore[assignment]
 
     return {
         "action": action,

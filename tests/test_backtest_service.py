@@ -13,6 +13,9 @@ import unittest
 from datetime import date, datetime
 from unittest.mock import patch
 
+import pandas as pd
+
+from data_provider.base import normalize_stock_code
 from src.config import Config
 from src.core.backtest_engine import OVERALL_SENTINEL_CODE
 from src.repositories.backtest_repo import BacktestRepository
@@ -557,6 +560,59 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertIn("AAPL.US", us_bare_variants)
         us_suffix_variants = BacktestRepository._build_market_code_variants("AAPL.US", "AAPL.US")
         self.assertIn("AAPL", us_suffix_variants)
+
+    def test_daily_refill_codes_normalize_legacy_ss_aliases_once(self) -> None:
+        candidates = BacktestService._build_daily_code_candidates("605066.SH")
+
+        self.assertIn("SS605066", candidates)
+        self.assertEqual(normalize_stock_code("SS605066"), "605066")
+        for alias in ("605066.SH", "605066", "SH605066", "SH.605066", "605066.SS", "SS.605066"):
+            with self.subTest(alias=alias):
+                self.assertEqual(BacktestService._normalize_daily_refill_code(alias), "605066")
+        self.assertEqual(
+            BacktestService._ordered_daily_refill_codes(
+                code_candidates=candidates,
+                preferred_code="605066.SH",
+            ),
+            ["605066"],
+        )
+
+    def test_try_fill_daily_data_uses_normalized_a_share_code_for_legacy_ss_alias(self) -> None:
+        requested_codes = []
+
+        class FakeDataFetcherManager:
+            def get_daily_data(self, stock_code, start_date=None, end_date=None, days=30):
+                requested_codes.append(stock_code)
+                return (
+                    pd.DataFrame(
+                        [
+                            {
+                                "date": date(2024, 7, 1),
+                                "open": 10.0,
+                                "high": 11.0,
+                                "low": 9.0,
+                                "close": 10.5,
+                                "volume": 1000,
+                            }
+                        ]
+                    ),
+                    "FakeFetcher",
+                )
+
+        service = BacktestService(self.db)
+        with patch("data_provider.base.DataFetcherManager", FakeDataFetcherManager):
+            service._try_fill_daily_data(
+                code="SS605066",
+                analysis_date=date(2024, 7, 1),
+                eval_window_days=1,
+            )
+
+        self.assertEqual(requested_codes, ["605066"])
+        self.assertEqual(
+            [row.code for row in self.db.get_data_range("605066", date(2024, 7, 1), date(2024, 7, 1))],
+            ["605066"],
+        )
+        self.assertEqual(self.db.get_data_range("SS605066", date(2024, 7, 1), date(2024, 7, 1)), [])
 
     def test_build_market_code_variants_rejects_hk_suffix_with_6_digit_base(self) -> None:
         invalid_variants = BacktestRepository._build_market_code_variants("600519.HK", "600519.HK")
@@ -1750,6 +1806,35 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(item["direction_expected"], "up")
         self.assertTrue(item["direction_correct"])
 
+    def test_get_recent_evaluations_aligns_neutral_advice_with_score(self) -> None:
+        service = BacktestService(self.db)
+        with self.db.get_session() as session:
+            history = session.query(AnalysisHistory).filter(AnalysisHistory.query_id == "q1").one()
+            history.operation_advice = "持有"
+            history.sentiment_score = 78
+            history.raw_result = None
+            result = self._make_backtest_result(
+                analysis_history_id=history.id,
+                analysis_date=date(2024, 1, 1),
+                eval_window_days=1,
+            )
+            result.operation_advice = "持有"
+            session.add(result)
+            session.commit()
+
+        data = service.get_recent_evaluations(
+            code="600519",
+            eval_window_days=1,
+            limit=10,
+            page=1,
+        )
+
+        self.assertEqual(data["total"], 1)
+        item = data["items"][0]
+        self.assertEqual(item["operation_advice"], "持有")
+        self.assertEqual(item["action"], "buy")
+        self.assertEqual(item["action_label"], "买入")
+
     def test_get_recent_evaluations_prefers_persisted_raw_action(self) -> None:
         service = BacktestService(self.db)
 
@@ -1761,6 +1846,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                     "operation_advice": "持有观察",
                     "action": "watch",
                     "action_label": "观望",
+                    "guardrail_reason": "市场风险较高，建议观望",
                 },
                 ensure_ascii=False,
             )
@@ -1992,7 +2078,12 @@ class BacktestServiceTestCase(unittest.TestCase):
         service = BacktestService(self.db)
         phase_snapshot = json.dumps({"market_phase_summary": {"phase": "intraday", "market": "cn"}})
         raw_result = json.dumps(
-            {"operation_advice": "持有观察", "action": "watch", "action_label": "观望"},
+            {
+                "operation_advice": "持有观察",
+                "action": "watch",
+                "action_label": "观望",
+                "guardrail_reason": "模型判定观望，保留原始动作",
+            },
             ensure_ascii=False,
         )
         rows = [
@@ -2004,6 +2095,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                 phase_snapshot,
                 raw_result,
                 "simple",
+                78,
             )
             for idx in range(2)
         ]

@@ -2510,6 +2510,18 @@
               "title": "Cost Method"
             },
             "description": "Cost method: fifo or avg"
+          },
+          {
+            "name": "include_realtime",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Whether today's risk snapshot should try realtime quotes before historical close fallback",
+              "default": true,
+              "title": "Include Realtime"
+            },
+            "description": "Whether today's risk snapshot should try realtime quotes before historical close fallback"
           }
         ],
         "responses": {
@@ -4116,7 +4128,8 @@
                 "type": "string",
                 "enum": [
                   "zh",
-                  "en"
+                  "en",
+                  "ko"
                 ]
               },
               {

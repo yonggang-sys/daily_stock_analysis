@@ -23,7 +23,7 @@ longbridge==0.2.74; platform_system == "Linux" and python_version < "3.12"
 longbridge>=4.0.5,<5; platform_system != "Linux" or python_version >= "3.12"
 tickflow>=0.1.24           # TickFlow official SDK; 0.1.24 verified for klines/get batch quotes/universes
 # Built-in optional AlphaSift screening engine
-git+https://github.com/ZhuLinsen/alphasift.git@0a7b9cd59e81718f851890535241bc105d4ddc64#egg=alphasift
+git+https://github.com/ZhuLinsen/alphasift.git@9f522747caafd3c0b1ddb7e14d5cf44c8580b6cf#egg=alphasift
 
 # Feishu
 lark-oapi>=1.0.0             # Feishu API

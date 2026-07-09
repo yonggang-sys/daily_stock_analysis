@@ -11,7 +11,13 @@ from data_provider.base import normalize_stock_code
 
 from src.analyzer import AnalysisResult
 from src.core.trading_calendar import get_market_for_stock
-from src.schemas.decision_action import build_action_fields
+from src.schemas.decision_action import build_action_fields, normalize_decision_action
+from src.schemas.decision_scale import (
+    CANONICAL_DECISION_SCALE_VERSION,
+    action_for_score,
+    score_action_conflicts_without_guardrail,
+    score_band_metadata,
+)
 from src.services.decision_signal_service import DecisionSignalService
 from src.services.portfolio_service import VALID_MARKETS
 from src.utils.sniper_points import extract_sniper_points
@@ -52,11 +58,22 @@ def build_decision_signal_payload_from_report(
     if profile_source not in _PROFILE_SOURCES:
         raise ValueError(f"invalid profile_source: {profile_source}")
 
+    dashboard = _as_mapping(getattr(result, "dashboard", None))
+    score_calibration = _as_mapping(dashboard.get("decision_score_calibration"))
+    score = _effective_signal_score(
+        _score_from_result(getattr(result, "sentiment_score", None)),
+        score_calibration,
+    )
+    raw_action = _raw_action_from_report(result)
+    guardrail_reason = _extract_guardrail_reason(result, dashboard, score=score, raw_action=raw_action)
     action_fields = build_action_fields(
         operation_advice=getattr(result, "operation_advice", None),
         explicit_action=getattr(result, "action", None),
         report_type=report_type,
         report_language=getattr(result, "report_language", None),
+        sentiment_score=score,
+        guardrail_reason=guardrail_reason,
+        align_with_score=True,
     )
     action = action_fields.get("action")
     if not action:
@@ -79,7 +96,6 @@ def build_decision_signal_payload_from_report(
         )
         return None
 
-    dashboard = _as_mapping(getattr(result, "dashboard", None))
     sniper_points = extract_sniper_points(result)
     entry_low, entry_high = _entry_range(
         sniper_points.get("ideal_buy"),
@@ -96,7 +112,28 @@ def build_decision_signal_payload_from_report(
         "profile_policy_version": "decision-profile-v1",
         "signal_generation_version": "legacy-report-extractor-v1",
         "decision_signal_metadata_version": "decision-signal-metadata-v1",
+        "canonical_decision_scale_version": CANONICAL_DECISION_SCALE_VERSION,
     }
+    score_metadata = score_band_metadata(score)
+    if score_metadata:
+        metadata["score_scale"] = score_metadata
+        metadata["raw_score"] = _calibrated_or_raw_score(
+            score_calibration,
+            prefer="raw",
+            fallback=score_metadata["score"],
+        )
+        metadata["adjusted_score"] = _calibrated_or_raw_score(
+            score_calibration,
+            prefer="adjusted",
+            fallback=score_metadata["score"],
+        )
+        metadata["final_action"] = action
+        if raw_action:
+            metadata["raw_action"] = raw_action
+        if raw_action and raw_action != action:
+            metadata["action_adjustment_reason"] = "canonical_score_alignment"
+    if guardrail_reason:
+        metadata["guardrail_reason"] = guardrail_reason
     market_phase_summary = _extract_market_phase_summary(context_snapshot, result)
     if market_phase_summary:
         metadata["market_phase_summary"] = market_phase_summary
@@ -114,7 +151,7 @@ def build_decision_signal_payload_from_report(
         "action": action,
         "action_label": action_fields.get("action_label"),
         "confidence": _confidence_from_level(getattr(result, "confidence_level", None)),
-        "score": _score_from_result(getattr(result, "sentiment_score", None)),
+        "score": score,
         "entry_low": entry_low,
         "entry_high": entry_high,
         "stop_loss": sniper_points.get("stop_loss"),
@@ -179,6 +216,30 @@ def _as_mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _calibrated_or_raw_score(
+    calibration: Dict[str, Any],
+    *,
+    prefer: Literal["raw", "adjusted"],
+    fallback: Optional[int] = None,
+) -> Optional[int]:
+    if prefer == "raw":
+        value = calibration.get("raw_score")
+    else:
+        value = calibration.get("adjusted_score")
+    parsed = _score_from_result(value)
+    if parsed is not None:
+        return parsed
+    return fallback
+
+
+def _effective_signal_score(
+    score: Optional[int],
+    calibration: Dict[str, Any],
+) -> Optional[int]:
+    adjusted = _calibrated_or_raw_score(calibration, prefer="adjusted")
+    return adjusted if adjusted is not None else score
+
+
 def _first_text(*values: Any) -> Optional[str]:
     for value in values:
         text = str(value or "").strip()
@@ -193,6 +254,76 @@ def _score_from_result(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return score if 0 <= score <= 100 else None
+
+
+def _raw_action_from_report(result: AnalysisResult) -> Optional[str]:
+    explicit_action = normalize_decision_action(getattr(result, "action", None))
+    if explicit_action:
+        return explicit_action
+    return normalize_decision_action(getattr(result, "operation_advice", None))
+
+
+_NEUTRAL_GUARDRAIL_HINTS = (
+    "等待",
+    "待",
+    "需要确认",
+    "回踩",
+    "支撑",
+    "压力",
+    "风险",
+    "资金",
+    "突破",
+    "不追",
+    "不宜",
+    "缺少",
+    "缺少确认",
+    "未确认",
+    "wait",
+    "waiting",
+    "pending confirmation",
+    "lack confirmation",
+    "pullback",
+    "support",
+    "resistance",
+    "risk",
+    "flow",
+)
+
+
+def _extract_guardrail_reason(
+    result: AnalysisResult,
+    dashboard: Mapping[str, Any],
+    *,
+    score: Optional[int],
+    raw_action: Optional[str],
+) -> Optional[str]:
+    score_calibration = _as_mapping(dashboard.get("decision_score_calibration"))
+    reason = _first_text(
+        score_calibration.get("guardrail_reason"),
+        _as_mapping(dashboard.get("decision_stability")).get("reason"),
+        getattr(result, "guardrail_reason", None),
+    )
+    if reason:
+        return reason
+
+    if score_action_conflicts_without_guardrail(score=score, action=raw_action):
+        candidates = [getattr(result, "operation_advice", None)]
+        if action_for_score(score) == "buy":
+            candidates.extend(
+                [
+                    getattr(result, "analysis_summary", None),
+                    getattr(result, "buy_reason", None),
+                    _watch_conditions(dashboard),
+                ]
+            )
+        for candidate in candidates:
+            text = _first_text(candidate)
+            if not text:
+                continue
+            normalized = text.lower()
+            if any(hint in normalized for hint in _NEUTRAL_GUARDRAIL_HINTS):
+                return text
+    return None
 
 
 def _confidence_from_level(value: Any) -> Optional[float]:

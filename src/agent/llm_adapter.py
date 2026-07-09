@@ -21,7 +21,6 @@ from src.config import (
     get_api_keys_for_model,
     get_config,
     get_configured_llm_models,
-    get_effective_agent_models_to_try,
     get_effective_agent_primary_model,
 )
 from src.agent.litellm_route_resolution import (
@@ -38,7 +37,7 @@ from src.agent.provider_trace import (
 from src.llm.errors import call_litellm_with_param_recovery
 from src.llm.backend_registry import (
     AUTO_AGENT_BACKEND_ID,
-    CODEX_CLI_BACKEND_ID,
+    GENERATION_ONLY_BACKEND_IDS,
     LITELLM_BACKEND_ID,
     resolve_agent_generation_backend_id,
 )
@@ -432,25 +431,25 @@ class LLMToolAdapter:
                 getattr(config, "agent_generation_backend", AUTO_AGENT_BACKEND_ID)
                 or AUTO_AGENT_BACKEND_ID
             ).strip().lower()
-            if generation_backend == CODEX_CLI_BACKEND_ID and agent_backend == AUTO_AGENT_BACKEND_ID:
+            if generation_backend in GENERATION_ONLY_BACKEND_IDS and agent_backend == AUTO_AGENT_BACKEND_ID:
                 self._backend_error = GenerationError(
                     error_code=GenerationErrorCode.UNSUPPORTED_TOOL_CALLING,
                     stage="generation",
                     retryable=False,
                     fallbackable=False,
-                    backend=CODEX_CLI_BACKEND_ID,
-                    provider=CODEX_CLI_BACKEND_ID,
+                    backend=generation_backend,
+                    provider=generation_backend,
                     details={
                         "field": "AGENT_GENERATION_BACKEND",
                         "requested_backend": AUTO_AGENT_BACKEND_ID,
-                        "generation_backend": CODEX_CLI_BACKEND_ID,
+                        "generation_backend": generation_backend,
                         "supported_tool_backend": LITELLM_BACKEND_ID,
                         "reason": "litellm_agent_backend_unavailable",
                     },
                 )
                 logger.error(
                     "Agent auto backend cannot inherit %s because it does not support tool calling",
-                    CODEX_CLI_BACKEND_ID,
+                    generation_backend,
                 )
                 return
             logger.warning("Agent LLM: no effective primary model configured")

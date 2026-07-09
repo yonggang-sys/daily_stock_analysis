@@ -21,7 +21,6 @@ for _mod in ("litellm", "google.generativeai", "google.genai", "anthropic"):
         sys.modules[_mod] = MagicMock()
 
 import pytest
-from unittest.mock import PropertyMock
 
 
 @pytest.fixture(autouse=True)
@@ -187,12 +186,20 @@ class TestAnalyzerGenerateText:
         assert result == "复盘"
         mock_persist.assert_not_called()
 
-    def test_codex_cli_is_available_without_litellm_api_keys(self):
+    @pytest.mark.parametrize(
+        ("generation_backend", "executable_name"),
+        [
+            ("codex_cli", "codex"),
+            ("claude_code_cli", "claude"),
+            ("opencode_cli", "opencode"),
+        ],
+    )
+    def test_local_cli_is_available_without_litellm_api_keys(self, generation_backend, executable_name):
         analyzer = self._make_analyzer()
         analyzer._litellm_available = False
         analyzer._router = None
         analyzer._config_override = SimpleNamespace(
-            generation_backend="codex_cli",
+            generation_backend=generation_backend,
             generation_fallback_backend="",
             generation_backend_timeout_seconds=300,
             generation_backend_max_output_bytes=1048576,
@@ -200,7 +207,7 @@ class TestAnalyzerGenerateText:
             local_cli_backend_max_concurrency=1,
         )
 
-        with patch("src.llm.local_cli_backend.shutil.which", return_value="/usr/bin/codex"), \
+        with patch("src.llm.local_cli_backend.shutil.which", return_value=f"/usr/bin/{executable_name}"), \
              patch("src.llm.local_cli_backend.os.access", return_value=True):
             assert analyzer.get_generation_backend_config_error() is None
             assert analyzer.is_available() is True
@@ -2863,6 +2870,29 @@ Sector text.
         assert "AI算力板块走强" not in result
         assert "新闻。" in result
         assert "算力产业链延续活跃" not in result
+
+    def test_inject_data_into_review_appends_sector_block_when_heading_drifts(self):
+        from src.market_analyzer import MarketOverview
+
+        ma = self._make_market_analyzer_with_mock_generate_text(return_value="review")
+        overview = MarketOverview(
+            date="2026-03-05",
+            top_sectors=[{"name": "AI算力", "change_pct": 3.25}],
+            bottom_sectors=[{"name": "煤炭", "change_pct": -1.12}],
+        )
+        review = """## 2026-03-05 大盘复盘
+
+### 今日主线观察
+正文。
+"""
+
+        result = ma._inject_data_into_review(review, overview)
+
+        assert "### 三、板块主线" in result
+        assert "#### 行业板块领涨 Top 5" in result
+        assert "| 1 | AI算力 | +3.25% |" in result
+        assert "#### 行业板块领跌 Top 5" in result
+        assert "| 1 | 煤炭 | -1.12% |" in result
 
     def test_market_review_payload_sections_skip_top_report_title(self):
         from src.market_analyzer import MarketAnalyzer

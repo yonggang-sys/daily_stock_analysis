@@ -8,6 +8,7 @@ from src.schemas.decision_action import (
     localize_action_label,
     normalize_decision_action,
 )
+from src.schemas.decision_scale import action_for_score, decision_type_for_score, signal_key_for_score
 
 
 @pytest.mark.parametrize(
@@ -319,3 +320,49 @@ def test_build_action_fields_keeps_empty_action_without_advice_or_explicit_actio
     )
 
     assert fields == {"action": None, "action_label": None}
+
+
+@pytest.mark.parametrize(
+    ("score", "expected_signal", "expected_action", "expected_decision_type"),
+    [
+        (28, "reduce", "reduce", "sell"),
+        (38, "reduce", "reduce", "sell"),
+        (42, "watch", "watch", "hold"),
+        (55, "watch", "watch", "hold"),
+        (60, "buy", "buy", "buy"),
+        (66, "buy", "buy", "buy"),
+        (72, "buy", "buy", "buy"),
+    ],
+)
+def test_canonical_score_scale_boundaries(
+    score: int,
+    expected_signal: str,
+    expected_action: str,
+    expected_decision_type: str,
+) -> None:
+    assert signal_key_for_score(score) == expected_signal
+    assert action_for_score(score) == expected_action
+    assert decision_type_for_score(score) == expected_decision_type
+
+
+def test_build_action_fields_can_align_neutral_action_with_directional_score() -> None:
+    assert build_action_fields(
+        operation_advice="持有",
+        sentiment_score=72,
+        align_with_score=True,
+    ) == {"action": "buy", "action_label": "买入"}
+
+    assert build_action_fields(
+        operation_advice="观望",
+        sentiment_score=28,
+        align_with_score=True,
+    ) == {"action": "reduce", "action_label": "减仓"}
+
+
+def test_build_action_fields_keeps_neutral_score_conflict_when_guardrail_is_explicit() -> None:
+    assert build_action_fields(
+        operation_advice="持有/观望待回踩",
+        sentiment_score=72,
+        guardrail_reason="等待回踩确认",
+        align_with_score=True,
+    ) == {"action": "watch", "action_label": "观望"}

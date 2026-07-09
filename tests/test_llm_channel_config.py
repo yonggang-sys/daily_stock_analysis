@@ -19,6 +19,7 @@ from src.config import (
     get_fixed_litellm_temperature,
     normalize_litellm_temperature,
 )
+from src.llm.backend_registry import GENERATION_ONLY_BACKEND_IDS
 from src.llm.hermes import open_hermes_no_proxy_client, parse_hermes_channel, route_has_hermes
 from src.llm.generation_params import (
     apply_litellm_generation_params,
@@ -402,25 +403,27 @@ class LLMChannelConfigTestCase(unittest.TestCase):
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
-    def test_agent_generation_backend_codex_cli_is_unavailable_even_with_safe_route(
+    def test_agent_generation_backend_local_cli_is_unavailable_even_with_safe_route(
         self,
         _mock_parse_yaml,
         _mock_setup_env,
     ) -> None:
-        env = {
-            "AGENT_MODE": "true",
-            "AGENT_GENERATION_BACKEND": "codex_cli",
-            "LLM_CHANNELS": "remote",
-            "LLM_REMOTE_PROTOCOL": "openai",
-            "LLM_REMOTE_BASE_URL": "https://api.example.com/v1",
-            "LLM_REMOTE_API_KEY": "sk-remote-test-value",
-            "LLM_REMOTE_MODELS": "gpt-4o-mini",
-        }
+        for backend in sorted(GENERATION_ONLY_BACKEND_IDS):
+            with self.subTest(backend=backend):
+                env = {
+                    "AGENT_MODE": "true",
+                    "AGENT_GENERATION_BACKEND": backend,
+                    "LLM_CHANNELS": "remote",
+                    "LLM_REMOTE_PROTOCOL": "openai",
+                    "LLM_REMOTE_BASE_URL": "https://api.example.com/v1",
+                    "LLM_REMOTE_API_KEY": "sk-remote-test-value",
+                    "LLM_REMOTE_MODELS": "gpt-4o-mini",
+                }
 
-        with patch.dict(os.environ, env, clear=True):
-            config = Config._load_from_env()
+                with patch.dict(os.environ, env, clear=True):
+                    config = Config._load_from_env()
 
-        self.assertFalse(config.is_agent_available())
+                self.assertFalse(config.is_agent_available())
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])

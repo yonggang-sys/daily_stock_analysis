@@ -579,8 +579,8 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertEqual(item["trend_prediction"], "看多")
         self.assertEqual(item["analysis_summary"], "基本面稳健，短期震荡")
         self.assertEqual(item["operation_advice"], "持有")
-        self.assertEqual(item["action"], "hold")
-        self.assertEqual(item["action_label"], "持有")
+        self.assertEqual(item["action"], "buy")
+        self.assertEqual(item["action_label"], "买入")
         self.assertEqual(item["model_used"], "gemini/gemini-2.5-pro")
         self.assertEqual(item["current_price"], 51.5)
         self.assertEqual(item["change_pct"], -4.61)
@@ -755,6 +755,37 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertEqual(response.items[0].action, "avoid")
         self.assertEqual(response.items[0].action_label, "回避")
 
+    def test_stock_bar_item_aligns_score_and_legacy_advice(self) -> None:
+        if get_stock_bar is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        result = self._build_result()
+        result.operation_advice = "持有"
+        result.sentiment_score = 78
+
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id="query_stock_bar_score_align",
+            report_type="detailed",
+            news_content="个股正文",
+            context_snapshot=None,
+            save_snapshot=False,
+        )
+        self.assertGreater(saved, 0)
+
+        response = get_stock_bar(
+            start_date=None,
+            end_date=None,
+            limit=10,
+            db_manager=self.db,
+        )
+
+        self.assertEqual(len(response.items), 1)
+        self.assertEqual(response.items[0].operation_advice, "持有")
+        self.assertEqual(response.items[0].sentiment_score, 78)
+        self.assertEqual(response.items[0].action, "buy")
+        self.assertEqual(response.items[0].action_label, "买入")
+
     def test_stock_bar_item_falls_back_to_raw_result_summary_fields(self) -> None:
         if get_stock_bar is None:
             self.skipTest("fastapi is not installed in this test environment")
@@ -791,8 +822,8 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertEqual(len(response.items), 1)
         self.assertEqual(response.items[0].sentiment_score, 78)
         self.assertEqual(response.items[0].operation_advice, "Hold")
-        self.assertEqual(response.items[0].action, "hold")
-        self.assertEqual(response.items[0].action_label, "Hold")
+        self.assertEqual(response.items[0].action, "buy")
+        self.assertEqual(response.items[0].action_label, "Buy")
 
     def test_history_detail_uses_service_resolved_action_fields(self) -> None:
         if get_history_detail is None:

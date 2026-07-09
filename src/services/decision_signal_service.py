@@ -18,7 +18,9 @@ from src.schemas.decision_action import (
     DecisionAction,
     build_action_fields,
     localize_action_label,
+    normalize_decision_action,
 )
+from src.schemas.decision_scale import action_for_score, score_action_conflicts_without_guardrail
 from src.services.portfolio_service import VALID_MARKETS
 from src.storage import (
     AnalysisHistory,
@@ -421,13 +423,92 @@ class DecisionSignalService:
         normalized_action = str(raw_action).strip() if raw_action is not None else None
         if not normalized_action:
             normalized_action = None
+        score = DecisionSignalService._history_int(
+            raw.get("sentiment_score"),
+            getattr(record, "sentiment_score", None),
+            default=None,
+        )
+        raw_action_value = normalize_decision_action(normalized_action) or normalize_decision_action(
+            normalized_operation_advice
+        )
+        guardrail_reason = DecisionSignalService._history_guardrail_reason(
+            raw=raw,
+            operation_advice=normalized_operation_advice,
+            score=score,
+            raw_action=raw_action_value,
+        )
         action_fields = build_action_fields(
             operation_advice=normalized_operation_advice,
             explicit_action=normalized_action,
             report_type=getattr(record, "report_type", ""),
             report_language=raw.get("report_language"),
+            sentiment_score=score,
+            guardrail_reason=guardrail_reason,
+            align_with_score=True,
         )
         return action_fields["action"], action_fields["action_label"]
+
+    @staticmethod
+    def _history_guardrail_reason(
+        *,
+        raw: Dict[str, Any],
+        operation_advice: Optional[str],
+        score: Optional[int],
+        raw_action: Optional[str],
+    ) -> Optional[str]:
+        dashboard = raw.get("dashboard") if isinstance(raw.get("dashboard"), dict) else {}
+        calibration = (
+            dashboard.get("decision_score_calibration")
+            if isinstance(dashboard.get("decision_score_calibration"), dict)
+            else {}
+        )
+        stability = (
+            dashboard.get("decision_stability")
+            if isinstance(dashboard.get("decision_stability"), dict)
+            else {}
+        )
+        for candidate in (
+            calibration.get("guardrail_reason"),
+            stability.get("reason"),
+            raw.get("guardrail_reason"),
+        ):
+            text = str(candidate or "").strip()
+            if text:
+                return text
+
+        if score_action_conflicts_without_guardrail(score=score, action=raw_action):
+            candidates = [operation_advice]
+            if action_for_score(score) == "buy":
+                candidates.extend(
+                    [
+                        raw.get("analysis_summary"),
+                        raw.get("buy_reason"),
+                        raw.get("risk_warning"),
+                    ]
+                )
+            hints = (
+                "等待",
+                "待",
+                "需要确认",
+                "缺少确认",
+                "未确认",
+                "回踩",
+                "支撑",
+                "压力",
+                "风险",
+                "资金",
+                "突破",
+                "不追",
+                "不宜",
+            )
+            for candidate in candidates:
+                text = str(candidate or "").strip()
+                if not text:
+                    continue
+                normalized = text.lower()
+                if any(hint in normalized for hint in hints):
+                    return text
+        return None
 
     def _apply_history_backfill_lifecycle(
         self,

@@ -589,7 +589,7 @@ describe('SettingsField', () => {
     expect(dialog).not.toHaveTextContent('GENERATION_BACKEND');
     expect(dialog).not.toHaveTextContent('配置样例');
     expect(dialog).not.toHaveTextContent('Phase 1');
-    expect(dialog).toHaveTextContent('本机已安装并登录 Codex CLI');
+    expect(dialog).toHaveTextContent('本机已安装并登录对应 CLI');
     expect(dialog).toHaveTextContent('默认模型配置会继续使用现有 API Key');
     expect(dialog).not.toHaveTextContent('高级说明');
     expect(dialog).not.toHaveTextContent('LiteLLM');

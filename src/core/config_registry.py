@@ -18,7 +18,7 @@ from src.config import (
 from src.notification_noise import NOTIFICATION_SEVERITIES
 from src.notification_routing import ROUTABLE_NOTIFICATION_CHANNELS
 
-SCHEMA_VERSION = "2026-06-23-local-cli-backend"
+SCHEMA_VERSION = "2026-06-29-claude-code-cli-backend"
 
 _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
     {
@@ -73,6 +73,8 @@ _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
 
 WEB_SETTINGS_HIDDEN_FROM_UI = {
     "DATABASE_PATH",
+    "DINGTALK_WEBHOOK_URL",
+    "DINGTALK_SECRET",
     "SQLITE_WAL_ENABLED",
     "SQLITE_BUSY_TIMEOUT_MS",
     "SQLITE_WRITE_RETRY_MAX",
@@ -85,7 +87,7 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
 _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     "STOCK_LIST": {
         "title": "Stock List",
-        "description": "Comma-separated watchlist stock codes.",
+        "description": "Watchlist stock codes. English commas are recommended; common pasted separators are normalized on save.",
         "category": "base",
         "data_type": "array",
         "ui_control": "textarea",
@@ -129,11 +131,44 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [
             {"label": "Default model settings", "value": "litellm"},
             {"label": "Codex CLI (experimental)", "value": "codex_cli"},
+            {"label": "Claude Code CLI (experimental)", "value": "claude_code_cli"},
+            {"label": "OpenCode CLI (experimental)", "value": "opencode_cli"},
         ],
-        "validation": {"enum": ["litellm", "codex_cli"]},
+        "validation": {"enum": ["litellm", "codex_cli", "claude_code_cli", "opencode_cli"]},
         "display_order": 0,
         "help_key": "settings.ai_model.GENERATION_BACKEND",
-        "examples": ["GENERATION_BACKEND=litellm", "GENERATION_BACKEND=codex_cli"],
+        "examples": [
+            "GENERATION_BACKEND=litellm",
+            "GENERATION_BACKEND=codex_cli",
+            "GENERATION_BACKEND=claude_code_cli",
+            "GENERATION_BACKEND=opencode_cli",
+        ],
+        "docs": [
+            {
+                "label": "LLM 配置指南",
+                "href": "https://github.com/ZhuLinsen/daily_stock_analysis/blob/main/docs/LLM_CONFIG_GUIDE.md",
+            },
+        ],
+        "warning_codes": [],
+    },
+    "OPENCODE_CLI_MODEL": {
+        "title": "OpenCode CLI Model",
+        "description": "Optional model override passed to OpenCode CLI when GENERATION_BACKEND=opencode_cli. Leave empty to use OpenCode's default model.",
+        "category": "ai_model",
+        "data_type": "string",
+        "ui_control": "text",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "",
+        "placeholder": "optional provider/model override",
+        "validation": {"pattern": r"^$|^[^\s|<>;`$]+$"},
+        "display_order": 1,
+        "help_key": "settings.ai_model.OPENCODE_CLI_MODEL",
+        "examples": [
+            "OPENCODE_CLI_MODEL=provider/model",
+            "OPENCODE_CLI_MODEL=opencode/model-name",
+        ],
         "docs": [
             {
                 "label": "LLM 配置指南",
@@ -144,7 +179,7 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     },
     "GENERATION_FALLBACK_BACKEND": {
         "title": "Fallback Generation Method",
-        "description": "Backend-level fallback method. Empty disables backend fallback; litellm can be used as fallback for Codex CLI.",
+        "description": "Backend-level fallback method. Empty disables backend fallback; litellm can be used as fallback for local CLI generation backends.",
         "category": "ai_model",
         "data_type": "string",
         "ui_control": "select",
@@ -2503,8 +2538,9 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [
             {"label": "Chinese", "value": "zh"},
             {"label": "English", "value": "en"},
+            {"label": "Korean", "value": "ko"},
         ],
-        "validation": {"enum": ["zh", "en"]},
+        "validation": {"enum": ["zh", "en", "ko"]},
         "display_order": 56,
         "help_key": "settings.notification.report_output",
         "examples": [
