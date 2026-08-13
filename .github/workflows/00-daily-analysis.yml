@@ -552,6 +552,15 @@ jobs:
             logs/
           retention-days: 30
 
+      - name: CI 取数产出（选股/热点/资金流，替代本地 westock 管线）
+        # 沙箱屏蔽东财 clist/push2his，本地无法复现；GitHub Runner 出网无屏蔽，在此产出。
+        # 失败不阻断 dsa 报告发布（continue-on-error）；早期运行请关注此步日志。
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python ci_emit.py
+          echo "✅ ci_emit 完成（reco/hotspot/holding_fundflow/latest.meta）"
+
       - name: 发布报告到 ci-reports 分支（供本地仪表盘免 token 拉取）
         if: success()
         env:
@@ -572,6 +581,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f reports/latest.md reports/latest.meta.json
+          # 方案A 产物（ci_emit 产出；缺失则跳过，不阻断 dsa 报告发布）
+          for f in reco.json hotspot_leaders.json holding_fundflow.json latest.meta.json; do
+            if [ -f "$f" ]; then git add -f "$f"; fi
+          done
           if git diff --cached --quiet; then
             echo "📭 无内容变化，跳过提交"
           else
