@@ -38,7 +38,7 @@ jobs:
     # 推荐位置仍是 Settings -> Secrets and variables -> Actions -> Repository variables。
     environment: STOCK_LIST
     # 添加超时限制，防止任务卡死
-    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '30') }}
+    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '60') }}
 
     # 发布步需要向 ci-reports 分支 push，故授予 contents: write
     # （仅覆盖本作业所需权限；同作业内 upload-artifact 同运行上传仅需 contents: read，write 已含 read）
