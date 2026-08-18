@@ -69,6 +69,8 @@ jobs:
           mkdir -p data logs reports
       
       - name: 执行股票分析
+        # 零 LLM 模式：未配置 GEMINI_API_KEY 时跳过 LLM 报告（选股由 ci_emit 独立产出，不依赖此步）
+        if: ${{ secrets.GEMINI_API_KEY != '' }}
         env:
           # ==========================================
           # AI 配置
@@ -554,41 +556,61 @@ jobs:
 
       - name: CI 取数产出（选股/热点/资金流，替代本地 westock 管线）
         # 沙箱屏蔽东财 clist/push2his，本地无法复现；GitHub Runner 出网无屏蔽，在此产出。
-        # 失败不阻断 dsa 报告发布（continue-on-error）；早期运行请关注此步日志。
+        # 零 LLM 模式：main.py 可能在无 key 时跳过，此处始终运行以产出选股 reco.json。
+        # 失败不阻断发布（continue-on-error）；早期运行请关注此步日志。
+        if: always()
         continue-on-error: true
         run: |
           set -euo pipefail
           python ci_emit.py
           echo "✅ ci_emit 完成（reco/hotspot/holding_fundflow/latest.meta）"
 
-      - name: 发布报告到 ci-reports 分支（供本地仪表盘免 token 拉取）
-        if: success()
+      - name: 发布报告 + 结构化 JSON 到 ci-reports 分支（供本地仪表盘免 token 拉取）
+        # 零 LLM 模式：发布门槛不再强依赖 LLM 报告(report_*.md)；
+        # 只要 ci_emit 产出的结构化 JSON(reco.json 等) 存在即发布，保证选股结论持续更新。
+        if: always()
         env:
           CI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3-flash-preview' }}
         run: |
           set -euo pipefail
           LATEST=$(ls -t reports/report_*.md 2>/dev/null | head -1) || true
-          if [ -z "$LATEST" ]; then
-            echo "⚠️ 未找到 reports/report_*.md，跳过发布"
+          # 收集 ci_emit 结构化产物（零 LLM，独立产出）
+          EMIT_FILES=""
+          for f in reco.json hotspot_leaders.json holding_fundflow.json; do
+            if [ -s "$f" ]; then EMIT_FILES="$EMIT_FILES $f"; fi
+          done
+          if [ -z "$LATEST" ] && [ -z "$EMIT_FILES" ]; then
+            echo "⚠️ 无 LLM 报告且无结构化 JSON，跳过发布"
             exit 0
           fi
-          cp "$LATEST" reports/latest.md
-          printf '{"generated_at":"%s","model":"%s","run_number":"%s","source":"%s"}\n' \
-            "$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" \
-            "${CI_MODEL}" \
-            "${{ github.run_number }}" \
-            "$LATEST" > reports/latest.meta.json
+          # 发布 LLM 报告（若有）
+          if [ -n "$LATEST" ]; then
+            cp "$LATEST" reports/latest.md
+            printf '{"generated_at":"%s","model":"%s","run_number":"%s","source":"%s"}\n' \
+              "$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" \
+              "${CI_MODEL}" \
+              "${{ github.run_number }}" \
+              "$LATEST" > reports/latest.meta.json
+          else
+            # 零 LLM 模式：用当前时间生成 meta，标记无 LLM 模型
+            printf '{"generated_at":"%s","model":"%s","run_number":"%s","source":"%s"}\n' \
+              "$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" \
+              "n/a(ci-emit-only)" \
+              "${{ github.run_number }}" \
+              "ci_emit" > reports/latest.meta.json
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f reports/latest.md reports/latest.meta.json
-          # 方案A 产物（ci_emit 产出；缺失则跳过，不阻断 dsa 报告发布）
-          for f in reco.json hotspot_leaders.json holding_fundflow.json latest.meta.json; do
+          if [ -f reports/latest.md ]; then git add -f reports/latest.md; fi
+          git add -f reports/latest.meta.json
+          # 方案A 产物（ci_emit 产出；缺失则跳过，不阻断发布）
+          for f in reco.json hotspot_leaders.json holding_fundflow.json; do
             if [ -f "$f" ]; then git add -f "$f"; fi
           done
           if git diff --cached --quiet; then
             echo "📭 无内容变化，跳过提交"
           else
-            git commit -m "publish latest analysis report (run ${{ github.run_number }})"
+            git commit -m "publish analysis artifacts (run ${{ github.run_number }})"
             git push -f origin HEAD:refs/heads/ci-reports
             echo "✅ 已发布到 ci-reports 分支"
           fi
