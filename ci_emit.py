@@ -46,7 +46,20 @@ def http_get(url, timeout=15, retries=3, headers=None, use_curl=False):
                 ctx.verify_mode = ssl.CERT_NONE
                 req = urllib.request.Request(url, headers=hd)
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                    return resp.read().decode("gbk", "ignore"), True
+                    raw = resp.read()
+
+                    for _enc in ("utf-8", "gbk"):
+
+                        try:
+
+                            return raw.decode(_enc), True
+
+                        except Exception:
+
+                            continue
+
+                    return raw.decode("utf-8", "ignore"), False
+
         except Exception as e:
             last = f"{type(e).__name__}: {e}"
             time.sleep(1.5 * (i + 1))
