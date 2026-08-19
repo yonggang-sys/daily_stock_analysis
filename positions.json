@@ -1,0 +1,172 @@
+{
+  "account": "普通(现金账户)",
+  "recorded_at": "2026-08-19 16:06",
+  "note": "基于2026-08-19 11:45 券商App截图刷新。当前持仓9只：绿发电力(000537)加仓至11300股(成本9.306)；南天信息(000948)加仓至8800股(成本18.132)；中辰股份(300933)加仓至11900股(成本7.802)；中国铁建(601186)12000股不变(成本6.997)；供销大集(000564)加仓至21800股(成本2.658，可用20800)；常铝股份(002160)加仓至5100股(成本3.938)；国投电力(600886)700股不变(成本19.102)；欧菲光(002456)1000股不变(成本13.221)；新增先锋转债(118076)1张(申购中签，面值100)。中天科技(600522)已清仓移除。先锋转债为可转债、尚未上市，现价=面值100。",
+  "holdings": [
+    {
+      "name": "绿发电力",
+      "code": "000537",
+      "type": "stock",
+      "quantity": 11300,
+      "available": 11300,
+      "avg_cost": 9.306,
+      "current_price": 7.730,
+      "market_value": 87349.0,
+      "pnl": -17813.6,
+      "pnl_pct": -16.94
+    },
+    {
+      "name": "中国铁建",
+      "code": "601186",
+      "type": "stock",
+      "quantity": 12000,
+      "available": 12000,
+      "avg_cost": 6.997,
+      "current_price": 6.010,
+      "market_value": 72120.0,
+      "pnl": -11840.55,
+      "pnl_pct": -14.1
+    },
+    {
+      "name": "南天信息",
+      "code": "000948",
+      "type": "stock",
+      "quantity": 8800,
+      "available": 8800,
+      "avg_cost": 18.132,
+      "current_price": 13.760,
+      "market_value": 121088.0,
+      "pnl": -38474.1,
+      "pnl_pct": -24.11
+    },
+    {
+      "name": "中辰股份",
+      "code": "300933",
+      "type": "stock",
+      "quantity": 11900,
+      "available": 11900,
+      "avg_cost": 7.802,
+      "current_price": 6.300,
+      "market_value": 74970.0,
+      "pnl": -17876.8,
+      "pnl_pct": -19.25
+    },
+    {
+      "name": "供销大集",
+      "code": "000564",
+      "type": "stock",
+      "quantity": 21800,
+      "available": 20800,
+      "avg_cost": 2.658,
+      "current_price": 1.520,
+      "market_value": 33136.0,
+      "pnl": -24817.5,
+      "pnl_pct": -42.82
+    },
+    {
+      "name": "常铝股份",
+      "code": "002160",
+      "type": "stock",
+      "quantity": 5100,
+      "available": 5100,
+      "avg_cost": 3.938,
+      "current_price": 3.900,
+      "market_value": 19890.0,
+      "pnl": -196.0,
+      "pnl_pct": -0.98
+    },
+    {
+      "name": "国投电力",
+      "code": "600886",
+      "type": "stock",
+      "quantity": 700,
+      "available": 700,
+      "avg_cost": 19.102,
+      "current_price": 14.030,
+      "market_value": 9821.0,
+      "pnl": -3550.71,
+      "pnl_pct": -26.55
+    },
+    {
+      "name": "欧菲光",
+      "code": "002456",
+      "type": "stock",
+      "quantity": 1000,
+      "available": 1000,
+      "avg_cost": 13.221,
+      "current_price": 6.820,
+      "market_value": 6820.0,
+      "pnl": -6400.77,
+      "pnl_pct": -48.41
+    },
+    {
+      "name": "先锋转债",
+      "code": "118076",
+      "type": "bond",
+      "quantity": 1,
+      "available": 1,
+      "avg_cost": 100.0,
+      "current_price": 100.0,
+      "market_value": 1000.0,
+      "pnl": 0.0,
+      "pnl_pct": 0.0
+    }
+  ],
+  "bonds": [],
+  "watchlist": [
+    {
+      "name": "吉林化纤",
+      "code": "000420"
+    },
+    {
+      "name": "长江电力",
+      "code": "600900"
+    },
+    {
+      "name": "远大控股",
+      "code": "000626"
+    },
+    {
+      "name": "网达软件",
+      "code": "603189"
+    },
+    {
+      "name": "南方精工",
+      "code": "002553"
+    },
+    {
+      "name": "三维通信",
+      "code": "002115"
+    },
+    {
+      "name": "国芯科技",
+      "code": "688262"
+    },
+    {
+      "name": "锐捷网络",
+      "code": "301165"
+    },
+    {
+      "name": "泛微网络",
+      "code": "603039"
+    },
+    {
+      "name": "易点天下",
+      "code": "301171"
+    },
+    {
+      "name": "北方铜业",
+      "code": "000737"
+    },
+    {
+      "name": "太极实业",
+      "code": "600667"
+    },
+    {
+      "name": "紫光股份",
+      "code": "000938"
+    }
+  ],
+  "price_updated_at": "2026-08-19 11:45",
+  "price_mode": "intraday"
+}
