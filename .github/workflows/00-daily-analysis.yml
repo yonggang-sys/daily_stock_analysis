@@ -69,8 +69,8 @@ jobs:
           mkdir -p data logs reports
       
       - name: 执行股票分析
-        # 零 LLM 模式：未配置 GEMINI_API_KEY 时跳过 LLM 报告（选股由 ci_emit 独立产出，不依赖此步）
-        if: ${{ secrets.GEMINI_API_KEY != '' }}
+        # 零 LLM 模式：未配置任何 LLM 密钥时跳过主分析
+        # （secrets 上下文不可用于 step if 条件，改为在 run 内判断 env 注入的密钥值）
         env:
           # ==========================================
           # AI 配置
@@ -437,6 +437,16 @@ jobs:
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
           
         run: |
+          # 零 LLM 模式：未配置任何 LLM 密钥时跳过主分析
+          # （secrets 不可用于 step if 条件 → 改在 run 内判断 env 注入值；
+          #  选股/热点等结构化产出由 ci_emit 步独立产出，不依赖此步）
+          if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "${LITELLM_API_KEY:-}" ] \
+             && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${DEEPSEEK_API_KEY:-}" ] \
+             && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${AIHUBMIX_KEY:-}" ]; then
+            echo "ℹ️ 零 LLM 模式：未配置 LLM 密钥，跳过主分析（选股由 ci_emit 独立产出）"
+            exit 0
+          fi
+
           # 解析自选股配置：
           # 1. Repository/Environment secrets 或 Repository variables（STOCK_LIST_CONFIG）
           # 2. 同名 Environment variables 注入的 runner 环境变量（STOCK_LIST）
