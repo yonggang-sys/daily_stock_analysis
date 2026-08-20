@@ -10,10 +10,10 @@
       "quantity": 11300,
       "available": 11300,
       "avg_cost": 9.306,
-      "current_price": 7.730,
-      "market_value": 87349.0,
-      "pnl": -17813.6,
-      "pnl_pct": -16.94
+      "current_price": 7.88,
+      "market_value": 89044.0,
+      "pnl": -16113.8,
+      "pnl_pct": -15.32
     },
     {
       "name": "中国铁建",
@@ -22,10 +22,10 @@
       "quantity": 12000,
       "available": 12000,
       "avg_cost": 6.997,
-      "current_price": 6.010,
-      "market_value": 72120.0,
-      "pnl": -11840.55,
-      "pnl_pct": -14.1
+      "current_price": 6.02,
+      "market_value": 72240.0,
+      "pnl": -11724.0,
+      "pnl_pct": -13.96
     },
     {
       "name": "南天信息",
@@ -34,9 +34,9 @@
       "quantity": 8800,
       "available": 8800,
       "avg_cost": 18.132,
-      "current_price": 13.760,
+      "current_price": 13.76,
       "market_value": 121088.0,
-      "pnl": -38474.1,
+      "pnl": -38473.6,
       "pnl_pct": -24.11
     },
     {
@@ -46,9 +46,9 @@
       "quantity": 11900,
       "available": 11900,
       "avg_cost": 7.802,
-      "current_price": 6.300,
+      "current_price": 6.3,
       "market_value": 74970.0,
-      "pnl": -17876.8,
+      "pnl": -17873.8,
       "pnl_pct": -19.25
     },
     {
@@ -58,10 +58,10 @@
       "quantity": 21800,
       "available": 20800,
       "avg_cost": 2.658,
-      "current_price": 1.520,
-      "market_value": 33136.0,
-      "pnl": -24817.5,
-      "pnl_pct": -42.82
+      "current_price": 1.45,
+      "market_value": 31610.0,
+      "pnl": -26334.4,
+      "pnl_pct": -45.45
     },
     {
       "name": "常铝股份",
@@ -70,10 +70,10 @@
       "quantity": 5100,
       "available": 5100,
       "avg_cost": 3.938,
-      "current_price": 3.900,
-      "market_value": 19890.0,
-      "pnl": -196.0,
-      "pnl_pct": -0.98
+      "current_price": 3.91,
+      "market_value": 19941.0,
+      "pnl": -142.8,
+      "pnl_pct": -0.71
     },
     {
       "name": "国投电力",
@@ -82,10 +82,10 @@
       "quantity": 700,
       "available": 700,
       "avg_cost": 19.102,
-      "current_price": 14.030,
-      "market_value": 9821.0,
-      "pnl": -3550.71,
-      "pnl_pct": -26.55
+      "current_price": 13.87,
+      "market_value": 9709.0,
+      "pnl": -3662.4,
+      "pnl_pct": -27.39
     },
     {
       "name": "欧菲光",
@@ -94,10 +94,10 @@
       "quantity": 1000,
       "available": 1000,
       "avg_cost": 13.221,
-      "current_price": 6.820,
-      "market_value": 6820.0,
-      "pnl": -6400.77,
-      "pnl_pct": -48.41
+      "current_price": 6.88,
+      "market_value": 6880.0,
+      "pnl": -6341.0,
+      "pnl_pct": -47.96
     },
     {
       "name": "先锋转债",
@@ -107,7 +107,7 @@
       "available": 1,
       "avg_cost": 100.0,
       "current_price": 100.0,
-      "market_value": 1000.0,
+      "market_value": 100.0,
       "pnl": 0.0,
       "pnl_pct": 0.0
     },
@@ -118,9 +118,9 @@
       "quantity": 0,
       "available": 0,
       "avg_cost": 0,
-      "current_price": 0,
-      "market_value": 0,
-      "pnl": 0,
+      "current_price": 33.25,
+      "market_value": 0.0,
+      "pnl": 0.0,
       "pnl_pct": 0,
       "cleared": true,
       "note": "2026-08-19 11:45 前已清仓，仅作留痕（数据未知故清零）"
@@ -185,6 +185,6 @@
       "code": "300017"
     }
   ],
-  "price_updated_at": "2026-08-19 11:45",
+  "price_updated_at": "2026-08-20 10:58",
   "price_mode": "intraday"
 }
