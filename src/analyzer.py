@@ -2781,8 +2781,23 @@ class GeminiAnalyzer:
             return self._router.completion(**effective_kwargs)
 
         keys = get_api_keys_for_model(model, config)
+        # Multi-key rotation: try each key in order on 429/RateLimit
         if keys:
-            effective_kwargs["api_key"] = keys[0]
+            for idx, key in enumerate(keys):
+                try:
+                    effective_kwargs["api_key"] = key
+                    effective_kwargs.update(extra_litellm_params(model, config))
+                    return litellm.completion(**effective_kwargs)
+                except Exception as e:
+                    err_text = str(e)
+                    is_rate_limit = ("429" in err_text or "rate_limit" in err_text.lower()
+                                     or "Resource Exhausted" in err_text
+                                     or "quota" in err_text.lower())
+                    if is_rate_limit and idx < len(keys) - 1:
+                        logger.warning(f"Gemini key #{idx+1} rate-limited (429), rotating to next key...")
+                        time.sleep(1.0)  # brief backoff before next key
+                        continue
+                    raise  # exhausted all keys or non-rate-limit error
         effective_kwargs.update(extra_litellm_params(model, config))
         return litellm.completion(**effective_kwargs)
 
