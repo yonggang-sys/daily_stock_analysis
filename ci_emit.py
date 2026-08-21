@@ -47,19 +47,14 @@ def http_get(url, timeout=15, retries=3, headers=None, use_curl=False):
                 req = urllib.request.Request(url, headers=hd)
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
                     raw = resp.read()
-
-                    for _enc in ("utf-8", "gbk"):
-
-                        try:
-
-                            return raw.decode(_enc), True
-
-                        except Exception:
-
-                            continue
-
-                    return raw.decode("utf-8", "ignore"), False
-
+                # 东财 push2/push2his 接口实际返回 UTF-8；个别老接口为 GBK。
+                # 优先 UTF-8，失败再回退 GBK（避免把 UTF-8 字节当 GBK 解码产生乱码，如 鑸绌烘満鍦→机器人）。
+                for _enc in ("utf-8", "gbk"):
+                    try:
+                        return raw.decode(_enc), True
+                    except Exception:
+                        continue
+                return raw.decode("gbk", "ignore"), True
         except Exception as e:
             last = f"{type(e).__name__}: {e}"
             time.sleep(1.5 * (i + 1))
