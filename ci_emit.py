@@ -82,20 +82,21 @@ def em_secid(code):
 QT_BULK = "https://qt.gtimg.cn/q="  # codes 逗号分隔，如 sh601318,sz000001
 KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,320,qfq"
 EM_SINGLE = "https://push2.eastmoney.com/api/qt/stock/get?secid={secid}&fields=f43,f57,f58,f116,f117,f162"
-EM_CLIST = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:2&fields=f12,f14,f62,f184,f3&pn=1&pz=80&po=1&ut=b2884a393a59ad640360834c4157f792"
-EM_HOT = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:3&fields=f12,f14,f62,f184,f3&pn=1&pz=80&po=1&ut=b2884a393a59ad640360834c4157f792"
+EM_CLIST = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:2&fields=f12,f14,f3,f62,f104,f105,f128,f136,f207&pn=1&pz=80&po=1&fid=f3&ut=b2884a393a59ad640360834c4157f792"
+EM_HOT = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:3&fields=f12,f14,f3,f62,f104,f105,f128,f136,f207&pn=1&pz=80&po=1&fid=f3&ut=b2884a393a59ad640360834c4157f792"
+EM_BOARD_MEMBERS = "https://push2.eastmoney.com/api/qt/clist/get?fs=b:{bk}+f:!50&fields=f12&pn=1&pz=1000&po=1&ut=b2884a393a59ad640360834c4157f792"
 EM_FLOW = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=30&klt=101&secid={secid}&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63"
 
 
 def fetch_qt_bulk(codes):
-    """codes: list['sh601318', ...] -> {code: {price,chg,mv}}  qt.gtimg 批量报价。"""
+    """codes: list['sh601318', ...] -> {code: {price,chg,mv,name,pe,pb}}  qt.gtimg 批量报价。"""
     out = {}
     for i in range(0, len(codes), 80):
         batch = codes[i:i + 80]
         url = QT_BULK + ",".join(batch)
         txt, ok = http_get(url, timeout=20)
         if not ok:
-            print(f"[warn] qt bulk 失败 batch {i}: {txt[:80]}")
+            print(f"[warn] qt bulk failed batch {i}: {txt[:80]}")
             continue
         for line in txt.split(";"):
             line = line.strip()
@@ -106,14 +107,18 @@ def fetch_qt_bulk(codes):
                 continue
             c = m.group(1)
             f = m.group(2).split("~")
-            # 字段索引参考 qt.gtimg：1=名称 3=当前价 4=昨收 5=今开 6=成交量(手) 7=外盘 8=内盘
-            # 31=涨跌额 32=涨跌幅(%) 33=最高 34=最低 35=涨停 36=跌停
-            # 37=振幅 38=换手率 39=市盈率 40=市净率 44=总市值(元) 45=流通市值(元)
+            # 字段索引参考 qt.gtimg 实测：1=名称 3=当前价 31=涨跌额 32=涨跌幅(%)
+            # 38=换手率 39=市盈率(TTM) 43=振幅 44=流通市值(亿) 45=总市值(亿) 46=市净率 49=量比
             try:
-                price = num(f[3]); chg = num(f[32]); mv = num(f[44])
+                price = num(f[3]); chg = num(f[32]); mv = num(f[45])
+                circ_mv = num(f[44]) if len(f) > 44 else None
+                name = f[1] if len(f) > 1 else ""
+                pe = num(f[39]) if len(f) > 39 else None
+                pb = num(f[46]) if len(f) > 46 else None
             except (IndexError, ValueError):
                 continue
-            out[c] = {"price": price, "chg": chg, "mv": (mv / 1e8) if mv else None}
+            out[c] = {"price": price, "chg": chg, "mv": mv, "circ_mv": circ_mv,
+                      "name": name, "pe": pe, "pb": pb}
     return out
 
 
@@ -125,7 +130,8 @@ def fetch_kline_52(code):
         return None
     try:
         j = json.loads(txt)
-        node = j["data"][code.lstrip("shsz")]
+        # 注意：data 键为完整符号（如 'sh601808'），裸码仅作兜底（此前用裸码 KeyError 全挂）
+        node = j["data"].get(code) or j["data"].get(code.lstrip("shsz")) or {}
         days = node.get("qfqday") or node.get("day")
         if not days or len(days) < 60:
             return None
@@ -143,7 +149,7 @@ def fetch_kline_52(code):
 
 
 def fetch_em_valuation(codes):
-    """codes: list['601318', ...] -> {code: {pe,pb,div,mv}}  东财单股（沙箱可用，但 CI 更快）。"""
+    """codes: list['601318', ...] -> {code: {name,pe,pb,div,mv}}  东财单股（补充股息率）。"""
     out = {}
     for code in codes:
         sec = em_secid(code)
@@ -153,51 +159,97 @@ def fetch_em_valuation(codes):
             continue
         try:
             d = json.loads(txt).get("data") or {}
-            pe = num(d.get("f9")) or num(d.get("f116"))
-            pb = num(d.get("f117"))
-            div = num(d.get("f162"))  # 股息率 TTM(%)
-            mv = num(d.get("f116"))    # 总市值(元)
-            # 注：f116 在 stock/get 中通常为总市值(元)；pe/pb 字段依接口返回
-            out[code] = {"pe": pe, "pb": pb, "div": div, "mv": (mv / 1e8) if mv else None}
+            name = d.get("f58") or ""
+            # 注意：该接口不返回 f9(PE)；f116=总市值(元)、f117 部分环境也回市值。
+            # PE/PB 由 qt.gtimg(f39/f40) 主供，此处仅取股息率与市值。
+            div_raw = num(d.get("f162"))
+            div = (div_raw / 100.0) if (div_raw is not None and div_raw > 50) else div_raw  # f162 常为百分号×100
+            mv = num(d.get("f116"))
+            out[code] = {"name": name, "pe": None, "pb": None, "div": div, "mv": (mv / 1e8) if mv else None}
         except Exception:
             continue
     return out
 
 
+def _valid_chg(v, limit=15.0):
+    """板块涨跌幅合法性校验：A股板块涨跌幅上限 ±10%（放宽到 ±15 容差）。"""
+    return v if (v is not None and abs(v) <= limit) else None
+
+
 def fetch_em_sectors():
-    """东财行业/概念板块榜 -> [(name, rank, zdf_chg)]  +  板块成分映射 {code: sector_name}。"""
+    """东财行业板块榜 -> [ {code,name,chg,lead_name,lead_pct,lead_code} ... ]。
+    字段：f12=板块代码 f14=板块名 f3=涨跌幅 f104/f105=上涨/下跌家数（仅日志核对）
+    f128=领涨股名 f136=领涨股涨跌幅 f207=领涨股代码。"""
     boards = []
     try:
         txt, ok = http_get(EM_CLIST, timeout=20)
         if ok:
             j = json.loads(txt).get("data") or {}
             items = (j.get("diff") or {}) if isinstance(j.get("diff"), dict) else {}
-            rank = 0
+            first = True
             for k, v in items.items():
-                rank += 1
-                boards.append((v.get("f14", ""), rank, num(v.get("f3")) or 0.0))
+                if first:
+                    # 原始首条打日志，便于核验字段语义（此前 f3 曾返回家数差类数据）
+                    print(f"[dbg] clist first raw: {json.dumps(v, ensure_ascii=False)[:300]}")
+                    first = False
+                chg = _valid_chg(num(v.get("f3")))
+                if chg is None:
+                    # f3 语义错位时降级：上涨家数-下跌家数仅作排序参考，涨跌幅置 0
+                    print(f"[warn] clist f3 越界，按 0 处理: {v.get('f14')} f3={v.get('f3')} f104={v.get('f104')} f105={v.get('f105')}")
+                    chg = 0.0
+                boards.append({"code": str(v.get("f12") or ""), "name": v.get("f14") or "",
+                               "chg": chg, "lead_name": v.get("f128") or "",
+                               "lead_pct": _valid_chg(num(v.get("f136")), limit=21.0),
+                               "lead_code": str(v.get("f207") or "")})
     except Exception as e:
         print(f"[warn] clist: {e}")
+    print(f"[info] 行业板块榜: {len(boards)} 条")
     return boards
 
 
 def fetch_em_hotspot():
-    """东财概念/题材热点 -> 领涨股列表 [(concept, name, pct)]。"""
+    """东财概念板块榜 -> 领涨股列表 [(concept_name, lead_name, lead_pct, lead_code)]。"""
     leads = []
     try:
         txt, ok = http_get(EM_HOT, timeout=20)
         if ok:
             j = json.loads(txt).get("data") or {}
             items = j.get("diff") or {}
+            first = True
             for k, v in items.items():
-                name = v.get("f14", "")
-                pct = num(v.get("f3")) or 0.0
-                concept = v.get("f12", "")
-                if name:
-                    leads.append((concept, name, pct))
+                if first:
+                    print(f"[dbg] hot first raw: {json.dumps(v, ensure_ascii=False)[:300]}")
+                    first = False
+                concept = v.get("f14") or ""      # 概念/板块名
+                lead_name = v.get("f128") or ""   # 领涨股名
+                lead_code = str(v.get("f207") or "")  # 领涨股代码
+                pct = _valid_chg(num(v.get("f136")), limit=21.0)  # 领涨股涨跌幅（20cm 上限）
+                if concept and lead_name:
+                    leads.append((concept, lead_name, pct if pct is not None else 0.0, lead_code))
     except Exception as e:
         print(f"[warn] hot: {e}")
+    print(f"[info] 概念热点领涨: {len(leads)} 条")
     return leads
+
+
+def fetch_board_members(bk_code):
+    """东财板块成分股 -> {bare_code,...}（供热点行业映射 universe）。"""
+    out = set()
+    if not bk_code or not str(bk_code).startswith("BK"):
+        return out
+    url = EM_BOARD_MEMBERS.format(bk=bk_code)
+    txt, ok = http_get(url, timeout=15)
+    if ok:
+        try:
+            j = json.loads(txt).get("data") or {}
+            items = j.get("diff") or {}
+            for k, v in items.items():
+                c = v.get("f12")
+                if c:
+                    out.add(str(c))
+        except Exception as e:
+            print(f"[warn] members {bk_code}: {e}")
+    return out
 
 
 def fetch_em_fundflow(code):
@@ -252,18 +304,18 @@ def emit_cand_markdown(path, rows):
 
 
 def emit_hot_board(path, boards):
-    """boards: [(name, rank, zdf)] -> | index | name | rank | zdf | 表。"""
+    """boards: [{code,name,chg,...}] -> | index | name | rank | zdf | 表。"""
     lines = ["| index | name | rank | zdf |", "|---|---|---|---|"]
-    for i, (name, rank, zdf) in enumerate(boards):
-        lines.append(f"| {i} | {name} | {rank} | {zdf:.2f} |")
+    for i, b in enumerate(boards):
+        lines.append(f"| {i} | {b['name']} | {i + 1} | {b['chg']:.2f} |")
     open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 
 
 def emit_hot_rank(path, leads):
-    """leads: [(concept, name, pct)] -> | concept | ... | leadStock | 表（供 parse_hotspot_leaders）。"""
-    lines = ["| concept | leadStock |", "|---|---|"]
-    for concept, name, pct in leads:
-        lines.append(f"| {concept} | {name}({pct:.2f}) |")
+    """leads: [(concept, name, pct, code)] -> | concept | code | name | pct | 表（供 parse_hotspot_leaders）。"""
+    lines = ["| concept | code | name | pct |", "|---|---|---|---|"]
+    for concept, name, pct, code in leads:
+        lines.append(f"| {concept} | {code or ''} | {name} | {pct:.2f} |")
     open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 
 
@@ -405,7 +457,7 @@ def build_reco_json(ws):
         r["pos52"] = round((price - low) / (high - low) * 100, 1) if (high and low and high > low) else None
         r["dd_high"] = round((price - high) / high * 100, 1) if (high and price) else None
         if r["mv"]:
-            r["mv_yi"] = round(r["mv"] / 1e8, 1)
+            r["mv_yi"] = round(r["mv"], 1)  # mv 已是亿元（qt f45 / 东财 f116/1e8）
         r["pullback"], r["pb_score"], r["pb_label"] = pullback(r)
         return r
 
@@ -486,7 +538,8 @@ def build_reco_json(ws):
 
 
 def build_hotspot_leaders(ws, name_to_code=None):
-    """解析 _hot_rank.md（emit_hot_rank 产出格式）-> hotspot_leaders.json。"""
+    """解析 _hot_rank.md（emit_hot_rank 4 列格式：| concept | code | name | pct |）-> hotspot_leaders.json。
+    兼容旧 2 列格式（| concept | name(pct) |）。"""
     path = f"{ws}/_hot_rank.md"
     if not os.path.exists(path):
         return []
@@ -495,15 +548,27 @@ def build_hotspot_leaders(ws, name_to_code=None):
     with open(path, encoding="utf-8") as f:
         for line in f:
             s = line.strip()
-            if s.startswith("|") and "leadStock" in s:
+            if s.startswith("|") and "concept" in s:
                 in_table = True
                 continue
             if s.startswith("|") and in_table:
                 if set(s) <= set("|- "):
                     continue
                 parts = [p.strip() for p in s.strip("|").split("|")]
+                if len(parts) >= 4 and parts[0] and parts[2]:
+                    # 新 4 列：concept | code | name | pct
+                    concept, code, name, pct = parts[0], parts[1], parts[2], parts[3]
+                    try:
+                        pct = float(pct)
+                    except ValueError:
+                        continue
+                    if not code:
+                        code = (name_to_code or {}).get(name)
+                    rows.append({"name": name, "pct": pct, "concept": concept, "code": code or None})
+                    continue
                 if len(parts) < 2:
                     continue
+                # 旧 2 列回退：concept | name(pct)
                 concept = parts[0]
                 lead = parts[-1]
                 m = re.match(r"^(.+?)\((\-?\d+\.?\d*)\)$", lead)
@@ -533,7 +598,7 @@ def build_holding_fundflow(ws, codes, names=None):
         price = q.get("price") or 0
         high52 = (k or {}).get("high52") or 0
         low52 = (k or {}).get("low52") or 0
-        circ_mv_raw = q.get("mv")  # 亿元（qt 已 /1e8）
+        circ_mv_raw = q.get("circ_mv") or q.get("mv")  # 亿元（qt f44 流通市值 / f45 总市值，已是亿元）
         main1 = (fl or {}).get("1d", 0.0) or 0.0
         main3 = (fl or {}).get("3d", 0.0) or 0.0
         main5 = (fl or {}).get("5d", 0.0) or 0.0
@@ -543,8 +608,6 @@ def build_holding_fundflow(ws, codes, names=None):
         drawdown_high = (price - high52) / high52 * 100 if high52 else 0
         rise_from_low = (price - low52) / low52 * 100 if low52 else 0
         distribution_ratio = main20 / (circ_mv_yi * 1e8) if circ_mv_yi else 0
-        if circ_mv_yi and abs(distribution_ratio) > 1:
-            distribution_ratio /= 1e8
         out[bare] = {
             "name": names.get(bare, ""), "code": bare, "price": price,
             "main_netflow_1d": round(main1, 0), "main_netflow_3d": round(main3, 0),
@@ -764,32 +827,35 @@ def run_full(ws):
         k = kls.get(c) or {}
         e = emv.get(bare_c) or {}
         q = qt.get(c) or {}
+        # 名称/PE/PB 由 qt.gtimg 主供（f1/f39/f40 实测可靠），东财单股补股息率/市值
         rows[c] = {
-            "name": (q.get("price") is not None and "") or "",  # 名称由东财单股补
+            "name": q.get("name") or e.get("name") or "",
             "price": q.get("price") or 0, "chg": q.get("chg") or 0,
-            "pe": e.get("pe") or 0, "pb": e.get("pb") or 0, "div": e.get("div") or 0,
+            "pe": q.get("pe") or e.get("pe") or 0, "pb": q.get("pb") or e.get("pb") or 0,
+            "div": e.get("div") or 0,
             "mv": e.get("mv") or q.get("mv") or 0,
             "high52": k.get("high52") or 0, "low52": k.get("low52") or 0,
             "c20": k.get("c20") or 0, "c60": k.get("c60") or 0,
         }
-    # 补名称：东财单股 f58
-    for bare_c in bare:
-        e = emv.get(bare_c) or {}
-        if e.get("name"):
-            for c in all_codes:
-                if c[2:] == bare_c:
-                    rows[c]["name"] = e["name"]
-    # 写 _candA~U.md
+    # 写 _candA~U.md（名称已由 qt 主供写入 rows）
     keys = list(cand.keys())  # A,B,C,D, U 由 build_universe 扩；此处骨架到 D，U 同 D 占位
     for k in ["A", "B", "C", "D"]:
         emit_cand_markdown(f"{ws}/_cand{k}.md", {c: rows[c] for c in cand[k].split(",") if c})
     emit_cand_markdown(f"{ws}/_candU.md", rows)  # 全量宇宙（含扩展）
-    # 2) 热点行业榜 + 板块成分 + 热点领涨
+    # 2) 热点行业榜 + 板块成分映射 + 热点领涨
     boards = fetch_em_sectors()
     emit_hot_board(f"{ws}/_hot_board.md", boards)
-    # 板块成分映射（热点行业 -> 成分股）：用骨架 universe 中属于热点行业的标的近似；精确成分需东财板块接口，CI 端可扩展
-    hot_names = {b[0] for b in boards[:10]}
-    hot_sec = {c: ("热点行业" if any(n in rows[c]["name"] for n in hot_names) else None) for c in all_codes}
+    # 板块成分映射：对 top10 热点行业逐个拉成分股（东财板块成分接口），
+    # 将 universe 中命中成分的股票映射到板块名（旧版用「板块名 in 股票名」子串匹配，恒为空）
+    hot_sec = {}
+    for b in boards[:10]:
+        members = fetch_board_members(b.get("code"))
+        if not members:
+            continue
+        for c in all_codes:
+            if c[2:] in members:
+                hot_sec[c] = b["name"]
+        print(f"[info] 热点行业 {b['name']}: 成分 {len(members)} 只，universe 命中 {sum(1 for c in all_codes if c[2:] in members)} 只")
     emit_hot_sectors(f"{ws}/_hot_sectors.json", hot_sec)
     leads = fetch_em_hotspot()
     emit_hot_rank(f"{ws}/_hot_rank.md", leads)
@@ -820,9 +886,10 @@ def selftest(ws):
                       "mv": 2200.0, "high52": 14.0, "low52": 10.0, "c20": 2.0, "c60": 8.0},
     }
     emit_cand_markdown(f"{d}/_candA.md", sample)
-    emit_hot_board(f"{d}/_hot_board.md", [("保险Ⅱ", 1, 2.3), ("银行", 2, 1.1)])
+    emit_hot_board(f"{d}/_hot_board.md", [{"code": "BK0474", "name": "保险Ⅱ", "chg": 2.3},
+                                          {"code": "BK0475", "name": "银行", "chg": 1.1}])
     emit_hot_sectors(f"{d}/_hot_sectors.json", {"sh601318": "保险Ⅱ", "sz000001": "银行"})
-    emit_hot_rank(f"{d}/_hot_rank.md", [("AI", "科大讯飞", 5.2), ("机器人", "拓斯达", 3.1)])
+    emit_hot_rank(f"{d}/_hot_rank.md", [("AI", "科大讯飞", 5.2, "002230"), ("机器人", "拓斯达", 3.1, "300607")])
     reco = build_reco_json(d)
     leads = build_hotspot_leaders(d, name_to_code={"科大讯飞": "002230", "拓斯达": "300607"})
     # 断言关键 schema
