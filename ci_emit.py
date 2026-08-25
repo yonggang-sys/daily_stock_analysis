@@ -86,6 +86,38 @@ EM_CLIST = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:2&fields=f12,
 EM_HOT = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:3&fields=f12,f14,f3,f62,f104,f105,f128,f136,f207&pn=1&pz=80&po=1&fid=f3&ut=b2884a393a59ad640360834c4157f792"
 EM_BOARD_MEMBERS = "https://push2.eastmoney.com/api/qt/clist/get?fs=b:{bk}+f:!50&fields=f12&pn=1&pz=1000&po=1&ut=b2884a393a59ad640360834c4157f792"
 EM_FLOW = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=30&klt=101&secid={secid}&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63"
+# 东财 push2 有多组等价主机（push2 / 1.push2 / 2.push2 / push2delay）。
+# GitHub Runner 单 IP 高频访问会被限流（RemoteDisconnected/502/静默空响应），
+# clist 类请求依次换主机重试可绕开（run 116 实证：clist 静默空 → 热点 0 条）。
+EM_PUSH2_HOSTS = ["push2.eastmoney.com", "1.push2.eastmoney.com",
+                  "2.push2.eastmoney.com", "push2delay.eastmoney.com"]
+
+
+def em_clist_items(url):
+    """东财 clist 多主机重试。url 为完整 URL（首主机），其余主机仅替换域名再试。
+    返回 diff dict；全部失败/空数据返回 {}（每步打 warn，便于日志定位）。"""
+    from urllib.parse import urlsplit, urlunsplit
+    sp = urlsplit(url)
+    for i, host in enumerate(EM_PUSH2_HOSTS):
+        try:
+            u = url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
+            txt, ok = http_get(u, timeout=20)
+            if not ok:
+                print(f"[warn] clist {host}: http_get 失败（超时/连接重置）")
+                continue
+            j = json.loads(txt).get("data") or {}
+            diff = j.get("diff") or {}
+            if not isinstance(diff, dict):
+                diff = {}
+            if not diff:
+                print(f"[warn] clist {host}: data.diff 为空（疑似限流空响应）")
+                continue
+            if i > 0:
+                print(f"[info] clist 主机 fallback 生效: {host}（{len(diff)} 条）")
+            return diff
+        except Exception as e:
+            print(f"[warn] clist {host}: {type(e).__name__}: {e}")
+    return {}
 
 
 def fetch_qt_bulk(codes):
@@ -182,25 +214,22 @@ def fetch_em_sectors():
     f128=领涨股名 f136=领涨股涨跌幅 f207=领涨股代码。"""
     boards = []
     try:
-        txt, ok = http_get(EM_CLIST, timeout=20)
-        if ok:
-            j = json.loads(txt).get("data") or {}
-            items = (j.get("diff") or {}) if isinstance(j.get("diff"), dict) else {}
-            first = True
-            for k, v in items.items():
-                if first:
-                    # 原始首条打日志，便于核验字段语义（此前 f3 曾返回家数差类数据）
-                    print(f"[dbg] clist first raw: {json.dumps(v, ensure_ascii=False)[:300]}")
-                    first = False
-                chg = _valid_chg(num(v.get("f3")))
-                if chg is None:
-                    # f3 语义错位时降级：上涨家数-下跌家数仅作排序参考，涨跌幅置 0
-                    print(f"[warn] clist f3 越界，按 0 处理: {v.get('f14')} f3={v.get('f3')} f104={v.get('f104')} f105={v.get('f105')}")
-                    chg = 0.0
-                boards.append({"code": str(v.get("f12") or ""), "name": v.get("f14") or "",
-                               "chg": chg, "lead_name": v.get("f128") or "",
-                               "lead_pct": _valid_chg(num(v.get("f136")), limit=21.0),
-                               "lead_code": str(v.get("f207") or "")})
+        items = em_clist_items(EM_CLIST)
+        first = True
+        for k, v in items.items():
+            if first:
+                # 原始首条打日志，便于核验字段语义（此前 f3 曾返回家数差类数据）
+                print(f"[dbg] clist first raw: {json.dumps(v, ensure_ascii=False)[:300]}")
+                first = False
+            chg = _valid_chg(num(v.get("f3")))
+            if chg is None:
+                # f3 语义错位时降级：上涨家数-下跌家数仅作排序参考，涨跌幅置 0
+                print(f"[warn] clist f3 越界，按 0 处理: {v.get('f14')} f3={v.get('f3')} f104={v.get('f104')} f105={v.get('f105')}")
+                chg = 0.0
+            boards.append({"code": str(v.get("f12") or ""), "name": v.get("f14") or "",
+                           "chg": chg, "lead_name": v.get("f128") or "",
+                           "lead_pct": _valid_chg(num(v.get("f136")), limit=21.0),
+                           "lead_code": str(v.get("f207") or "")})
     except Exception as e:
         print(f"[warn] clist: {e}")
     print(f"[info] 行业板块榜: {len(boards)} 条")
@@ -211,21 +240,18 @@ def fetch_em_hotspot():
     """东财概念板块榜 -> 领涨股列表 [(concept_name, lead_name, lead_pct, lead_code)]。"""
     leads = []
     try:
-        txt, ok = http_get(EM_HOT, timeout=20)
-        if ok:
-            j = json.loads(txt).get("data") or {}
-            items = j.get("diff") or {}
-            first = True
-            for k, v in items.items():
-                if first:
-                    print(f"[dbg] hot first raw: {json.dumps(v, ensure_ascii=False)[:300]}")
-                    first = False
-                concept = v.get("f14") or ""      # 概念/板块名
-                lead_name = v.get("f128") or ""   # 领涨股名
-                lead_code = str(v.get("f207") or "")  # 领涨股代码
-                pct = _valid_chg(num(v.get("f136")), limit=21.0)  # 领涨股涨跌幅（20cm 上限）
-                if concept and lead_name:
-                    leads.append((concept, lead_name, pct if pct is not None else 0.0, lead_code))
+        items = em_clist_items(EM_HOT)
+        first = True
+        for k, v in items.items():
+            if first:
+                print(f"[dbg] hot first raw: {json.dumps(v, ensure_ascii=False)[:300]}")
+                first = False
+            concept = v.get("f14") or ""      # 概念/板块名
+            lead_name = v.get("f128") or ""   # 领涨股名
+            lead_code = str(v.get("f207") or "")  # 领涨股代码
+            pct = _valid_chg(num(v.get("f136")), limit=21.0)  # 领涨股涨跌幅（20cm 上限）
+            if concept and lead_name:
+                leads.append((concept, lead_name, pct if pct is not None else 0.0, lead_code))
     except Exception as e:
         print(f"[warn] hot: {e}")
     print(f"[info] 概念热点领涨: {len(leads)} 条")
@@ -233,22 +259,19 @@ def fetch_em_hotspot():
 
 
 def fetch_board_members(bk_code):
-    """东财板块成分股 -> {bare_code,...}（供热点行业映射 universe）。"""
+    """东财板块成分股 -> {bare_code,...}（供热点行业映射 universe）。多主机重试。"""
     out = set()
     if not bk_code or not str(bk_code).startswith("BK"):
         return out
     url = EM_BOARD_MEMBERS.format(bk=bk_code)
-    txt, ok = http_get(url, timeout=15)
-    if ok:
-        try:
-            j = json.loads(txt).get("data") or {}
-            items = j.get("diff") or {}
-            for k, v in items.items():
-                c = v.get("f12")
-                if c:
-                    out.add(str(c))
-        except Exception as e:
-            print(f"[warn] members {bk_code}: {e}")
+    try:
+        items = em_clist_items(url)
+        for k, v in items.items():
+            c = v.get("f12")
+            if c:
+                out.add(str(c))
+    except Exception as e:
+        print(f"[warn] members {bk_code}: {e}")
     return out
 
 
@@ -578,8 +601,8 @@ def build_hotspot_leaders(ws, name_to_code=None):
                 pct = float(m.group(2))
                 code = (name_to_code or {}).get(name)
                 rows.append({"name": name, "pct": pct, "concept": concept, "code": code})
-    if rows:
-        json.dump(rows, open(f"{ws}/hotspot_leaders.json", "w", encoding="utf-8"), ensure_ascii=False)
+    # 始终写文件（含空列表）：本地拉取可区分「今日 CI 无数据」与「陈旧缓存」
+    json.dump(rows, open(f"{ws}/hotspot_leaders.json", "w", encoding="utf-8"), ensure_ascii=False)
     return rows
 
 
@@ -593,6 +616,8 @@ def build_holding_fundflow(ws, codes, names=None):
     qt = fetch_qt_bulk([s for _, s in sym_map])
     for bare, sym in sym_map:
         fl = fetch_em_fundflow(bare)
+        if fl is None:
+            print(f"[warn] fundflow {bare}: push2his 无数据（限流/接口失败），主力净额按 0 计")
         q = qt.get(sym, {})
         k = fetch_kline_52(sym)
         price = q.get("price") or 0
@@ -842,8 +867,16 @@ def run_full(ws):
     for k in ["A", "B", "C", "D"]:
         emit_cand_markdown(f"{ws}/_cand{k}.md", {c: rows[c] for c in cand[k].split(",") if c})
     emit_cand_markdown(f"{ws}/_candU.md", rows)  # 全量宇宙（含扩展）
-    # 2) 热点行业榜 + 板块成分映射 + 热点领涨
+    # 2) 热点行业榜 + 板块成分映射 + 热点领涨（东财 clist，限流时空结果 → 60s 冷却重试一轮）
     boards = fetch_em_sectors()
+    leads = fetch_em_hotspot()
+    if not boards or not leads:
+        print(f"[warn] 板块/热点首轮回空（boards={len(boards)}, leads={len(leads)}），60s 冷却后重试")
+        time.sleep(60)
+        if not boards:
+            boards = fetch_em_sectors()
+        if not leads:
+            leads = fetch_em_hotspot()
     emit_hot_board(f"{ws}/_hot_board.md", boards)
     # 板块成分映射：对 top10 热点行业逐个拉成分股（东财板块成分接口），
     # 将 universe 中命中成分的股票映射到板块名（旧版用「板块名 in 股票名」子串匹配，恒为空）
