@@ -82,8 +82,8 @@ def em_secid(code):
 QT_BULK = "https://qt.gtimg.cn/q="  # codes 逗号分隔，如 sh601318,sz000001
 KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,320,qfq"
 EM_SINGLE = "https://push2.eastmoney.com/api/qt/stock/get?secid={secid}&fields=f43,f57,f58,f116,f117,f162"
-EM_CLIST = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:2&fields=f12,f14,f3,f62,f104,f105,f128,f136,f207&pn=1&pz=80&po=1&fid=f3&ut=b2884a393a59ad640360834c4157f792"
-EM_HOT = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:3&fields=f12,f14,f3,f62,f104,f105,f128,f136,f207&pn=1&pz=80&po=1&fid=f3&ut=b2884a393a59ad640360834c4157f792"
+EM_CLIST = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:2&fields=f12,f14,f3,f62,f104,f105,f128,f136,f140,f207&pn=1&pz=80&po=1&fid=f3&ut=b2884a393a59ad640360834c4157f792"
+EM_HOT = "https://push2.eastmoney.com/api/qt/clist/get?fs=m:90+t:3&fields=f12,f14,f3,f62,f104,f105,f128,f136,f140,f207&pn=1&pz=80&po=1&fid=f3&ut=b2884a393a59ad640360834c4157f792"
 EM_BOARD_MEMBERS = "https://push2.eastmoney.com/api/qt/clist/get?fs=b:{bk}+f:!50&fields=f12&pn=1&pz=1000&po=1&ut=b2884a393a59ad640360834c4157f792"
 EM_FLOW = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=30&klt=101&secid={secid}&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63"
 # 东财 push2 有多组等价主机（push2 / 1.push2 / 2.push2 / push2delay）。
@@ -210,26 +210,25 @@ def _valid_chg(v, limit=15.0):
 
 def fetch_em_sectors():
     """东财行业板块榜 -> [ {code,name,chg,lead_name,lead_pct,lead_code} ... ]。
-    字段：f12=板块代码 f14=板块名 f3=涨跌幅 f104/f105=上涨/下跌家数（仅日志核对）
-    f128=领涨股名 f136=领涨股涨跌幅 f207=领涨股代码。"""
+    字段：f12=板块代码 f14=板块名 f3=涨跌幅(基点0.01%) f104/f105=上涨/下跌家数
+    f128=领涨股名 f136=领涨股涨跌幅(基点0.01%) f140=领涨股代码。"""
     boards = []
     try:
         items = em_clist_items(EM_CLIST)
         first = True
         for k, v in items.items():
             if first:
-                # 原始首条打日志，便于核验字段语义（此前 f3 曾返回家数差类数据）
                 print(f"[dbg] clist first raw: {json.dumps(v, ensure_ascii=False)[:300]}")
                 first = False
-            chg = _valid_chg(num(v.get("f3")))
+            # f3/f136 单位为 0.01%（基点），需 /100 转为百分比
+            chg = _valid_chg(num(v.get("f3")) / 100)
             if chg is None:
-                # f3 语义错位时降级：上涨家数-下跌家数仅作排序参考，涨跌幅置 0
                 print(f"[warn] clist f3 越界，按 0 处理: {v.get('f14')} f3={v.get('f3')} f104={v.get('f104')} f105={v.get('f105')}")
                 chg = 0.0
             boards.append({"code": str(v.get("f12") or ""), "name": v.get("f14") or "",
                            "chg": chg, "lead_name": v.get("f128") or "",
-                           "lead_pct": _valid_chg(num(v.get("f136")), limit=21.0),
-                           "lead_code": str(v.get("f207") or "")})
+                           "lead_pct": _valid_chg(num(v.get("f136")) / 100, limit=21.0),
+                           "lead_code": str(v.get("f140") or "")})
     except Exception as e:
         print(f"[warn] clist: {e}")
     print(f"[info] 行业板块榜: {len(boards)} 条")
@@ -237,7 +236,8 @@ def fetch_em_sectors():
 
 
 def fetch_em_hotspot():
-    """东财概念板块榜 -> 领涨股列表 [(concept_name, lead_name, lead_pct, lead_code)]。"""
+    """东财概念板块榜 -> 领涨股列表 [(concept_name, lead_name, lead_pct, lead_code)]。
+    f136=领涨股涨跌幅(基点0.01%) f140=领涨股代码。"""
     leads = []
     try:
         items = em_clist_items(EM_HOT)
@@ -248,8 +248,8 @@ def fetch_em_hotspot():
                 first = False
             concept = v.get("f14") or ""      # 概念/板块名
             lead_name = v.get("f128") or ""   # 领涨股名
-            lead_code = str(v.get("f207") or "")  # 领涨股代码
-            pct = _valid_chg(num(v.get("f136")), limit=21.0)  # 领涨股涨跌幅（20cm 上限）
+            lead_code = str(v.get("f140") or "")  # 领涨股代码
+            pct = _valid_chg(num(v.get("f136")) / 100, limit=21.0)  # f136 基点→百分比
             if concept and lead_name:
                 leads.append((concept, lead_name, pct if pct is not None else 0.0, lead_code))
     except Exception as e:
