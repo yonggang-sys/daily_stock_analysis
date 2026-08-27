@@ -65,6 +65,43 @@ jobs:
       - name: 创建必要目录
         run: |
           mkdir -p data logs reports
+
+      - name: 恢复数据缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/
+          key: stock-data-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stock-data-${{ github.run_id }}-
+            stock-data-
+
+      - name: Key 连通性预检
+        run: |
+          echo "=========================================="
+          echo "🔑 LLM Key 配置检查"
+          echo "=========================================="
+          python -c "
+          import os
+          keys = {
+            'Gemini': os.getenv('GEMINI_API_KEY'),
+            'DeepSeek': os.getenv('DEEPSEEK_API_KEY'),
+            'OpenAI': os.getenv('OPENAI_API_KEY'),
+            'Anthropic': os.getenv('ANTHROPIC_API_KEY'),
+            'AIHubMix': os.getenv('AIHUBMIX_KEY'),
+            'LiteLLM': os.getenv('LITELLM_API_KEY'),
+          }
+          configured = 0
+          for name, key in keys.items():
+            if key:
+              configured += 1
+              print(f'  {name}: ✅ 已配置')
+            else:
+              print(f'  {name}: ⚪ 未配置')
+          print(f'\n共 {configured}/{len(keys)} 个 key 已配置')
+          if configured == 0:
+            print('⚠️ 警告：未配置任何 LLM key')
+          "
       
       - name: 执行股票分析
         # 零 LLM 模式：未配置任何 LLM 密钥时跳过主分析
@@ -543,14 +580,45 @@ jobs:
             echo "⚡ 已启用强制运行模式（跳过交易日检查）"
           fi
 
-          # 执行分析
-          if [ "$MODE" = "market-only" ]; then
-            python main.py --market-review $FORCE_RUN_ARG
-          elif [ "$MODE" = "stocks-only" ]; then
-            python main.py --no-market-review $FORCE_RUN_ARG
-          else
-            python main.py $FORCE_RUN_ARG
+          # 检查今日是否已有成功产物，避免重复全量分析
+          TODAY=$(date +%Y%m%d)
+          if [ -f "reports/.analysis_done" ] && [ "$(cat reports/.analysis_done)" = "$TODAY" ]; then
+            echo "✅ 今日分析产物已存在，跳过重复执行"
+            ls -lh reports/report_*.md 2>/dev/null || true
+            exit 0
           fi
+
+          # 执行分析（3次尝试，间隔递增）
+          for attempt in 1 2 3; do
+            echo ""
+            echo "=========================================="
+            echo "🚀 执行分析 - 尝试 $attempt/3"
+            echo "=========================================="
+            
+            ANALYSIS_OK=0
+            if [ "$MODE" = "market-only" ]; then
+              python main.py --market-review $FORCE_RUN_ARG && ANALYSIS_OK=1
+            elif [ "$MODE" = "stocks-only" ]; then
+              python main.py --no-market-review $FORCE_RUN_ARG && ANALYSIS_OK=1
+            else
+              python main.py $FORCE_RUN_ARG && ANALYSIS_OK=1
+            fi
+            
+            if [ "$ANALYSIS_OK" = "1" ]; then
+              echo "$TODAY" > reports/.analysis_done
+              echo "✅ 分析成功，已标记完成"
+              exit 0
+            fi
+            
+            if [ $attempt -lt 3 ]; then
+              WAIT=$((60 * attempt))
+              echo "⏳ 等待 ${WAIT} 秒后重试..."
+              sleep $WAIT
+            fi
+          done
+          
+          echo "❌ 分析在3次尝试后均失败"
+          exit 1
       
       - name: 上传分析报告
         uses: actions/upload-artifact@v6
@@ -562,16 +630,28 @@ jobs:
             logs/
           retention-days: 30
 
-      - name: CI 取数产出（选股/热点/资金流，替代本地 westock 管线）
+      - name: CI 取数产出（选股/热点/资金流）
         # 沙箱屏蔽东财 clist/push2his，本地无法复现；GitHub Runner 出网无屏蔽，在此产出。
         # 零 LLM 模式：main.py 可能在无 key 时跳过，此处始终运行以产出选股 reco.json。
-        # 失败不阻断发布（continue-on-error）；早期运行请关注此步日志。
         if: always()
-        continue-on-error: true
+        id: ci_emit
         run: |
           set -euo pipefail
-          python ci_emit.py
+          for attempt in 1 2 3; do
+            echo "ci_emit 尝试 $attempt/3..."
+            python ci_emit.py && break
+            if [ $attempt -lt 3 ]; then
+              echo "⏳ 等待 30 秒后重试..."
+              sleep 30
+            fi
+          done
           echo "✅ ci_emit 完成（reco/hotspot/holding_fundflow/latest.meta）"
+      
+      - name: CI 取数失败告警
+        if: steps.ci_emit.outcome == 'failure'
+        run: |
+          echo "⚠️ CI 取数产出失败，选股/热点/资金流数据可能缺失"
+          echo "请检查 ci_emit 日志"
 
       - name: 发布报告 + 结构化 JSON 到 ci-reports 分支（供本地仪表盘免 token 拉取）
         # 零 LLM 模式：发布门槛不再强依赖 LLM 报告(report_*.md)；
@@ -645,3 +725,21 @@ jobs:
             echo "📜 最近日志（最后 30 行）:"
             tail -30 logs/stock_analysis_*.log 2>/dev/null || echo "无日志"
           fi
+
+  notify-on-failure:
+    runs-on: ubuntu-latest
+    needs: analyze
+    if: failure()
+    steps:
+      - name: 任务失败通知
+        run: |
+          echo "=========================================="
+          echo "❌ 每日股票分析任务失败"
+          echo "=========================================="
+          echo "Run #${{ github.run_number }}"
+          echo "请检查 Actions 日志：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "常见失败原因："
+          echo "  1. LLM API 限流/超时 → 检查是否有备用 key"
+          echo "  2. 数据源网络波动 → 已配置自动重试，仍失败请检查日志"
+          echo "  3. 配置缺失 → 检查 Secrets/Variables 设置"
+          echo "=========================================="
