@@ -3,7 +3,7 @@ name: 每日股票分析
 on:
   # 定时触发 - 北京时间 08:30 11:45 15:30
   schedule:
-    - cron: '30 0 * * 1-5'      # 北京 08:30 - 盘前
+    - cron: '30 0 * * 1-5'     # 北京 08:30 - 盘前
     - cron: '45 3 * * 1-5'     # 北京 11:45 - 午盘复盘
     - cron: '30 7 * * 1-5'     # 北京 15:30 - 收盘
   # 手动触发
@@ -67,7 +67,7 @@ jobs:
           mkdir -p data logs reports
 
       - name: 恢复数据缓存
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             data/
