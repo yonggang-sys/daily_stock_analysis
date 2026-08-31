@@ -352,7 +352,9 @@ def resolve_daily_stock_identity(
 
     identity_code = raw_code
     trusted_market = str(market_hint or "").strip().lower()
-    if raw_code.isdigit() and len(raw_code) in {4, 5, 6}:
+    if trusted_market == "hk" and raw_code.isdigit() and 1 <= len(raw_code) <= 3:
+        identity_code = raw_code.zfill(5)
+    elif raw_code.isdigit() and len(raw_code) in {4, 5, 6}:
         from src.data.stock_index_loader import resolve_index_stock_code_candidates
 
         indexed_candidates = resolve_index_stock_code_candidates(raw_code)
@@ -363,9 +365,9 @@ def resolve_daily_stock_identity(
         indexed_offshore = [
             (candidate, market)
             for candidate, market in indexed_identities
-            if market in {"jp", "kr"}
+            if market in {"jp", "kr", "tw"}
         ]
-        if trusted_market in {"jp", "kr"}:
+        if trusted_market in {"jp", "kr", "tw"}:
             matching_candidates = [
                 candidate
                 for candidate, market in indexed_offshore
@@ -373,6 +375,13 @@ def resolve_daily_stock_identity(
             ]
             if len(matching_candidates) == 1:
                 identity_code = matching_candidates[0]
+            elif trusted_market == "tw" and len(raw_code) in {4, 5, 6}:
+                return DailyStockIdentity(
+                    normalized_code=raw_code,
+                    market="tw",
+                    refill_code="",
+                    code_candidates=(raw_code,),
+                )
             elif indexed_candidates:
                 return None
             elif trusted_market == "jp" and len(raw_code) in {4, 5}:

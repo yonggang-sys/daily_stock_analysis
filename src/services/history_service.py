@@ -19,6 +19,7 @@ from typing import Optional, Dict, Any, List, Tuple, TYPE_CHECKING
 from src.config import get_config, resolve_news_window_days
 from src.formatters import markdown_to_plain_text
 from src.data.stock_index_loader import resolve_index_stock_code
+from src.services.stock_code_utils import resolve_daily_stock_identity
 from src.report_language import (
     get_bias_status_emoji,
     get_localized_stock_name,
@@ -104,7 +105,11 @@ class HistoryService:
         return value.astimezone().isoformat()
 
     @staticmethod
-    def _history_code_filter_candidates(stock_code: str) -> List[str]:
+    def _history_code_filter_candidates(
+        stock_code: str,
+        *,
+        market_hint: Optional[str] = None,
+    ) -> List[str]:
         raw_code = str(stock_code or "").strip()
         if not raw_code:
             return []
@@ -115,6 +120,20 @@ class HistoryService:
             candidate = str(candidate or "").strip().upper()
             if candidate and candidate not in candidates:
                 candidates.append(candidate)
+
+        trusted_market = str(market_hint or "").strip().lower()
+        if trusted_market:
+            identity = resolve_daily_stock_identity(raw_code, market_hint=trusted_market)
+            if identity is None or identity.market != trusted_market:
+                return []
+            for candidate in identity.code_candidates:
+                candidate_text = str(candidate or "").strip()
+                if candidate_text.isdigit():
+                    unhinted_identity = resolve_daily_stock_identity(candidate_text)
+                    if unhinted_identity is None or unhinted_identity.market != trusted_market:
+                        continue
+                add(candidate)
+            return candidates
 
         try:
             from data_provider.base import (
@@ -219,7 +238,9 @@ class HistoryService:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         page: int = 1,
-        limit: int = 20
+        limit: int = 20,
+        include_ambiguous_numeric_aliases: bool = True,
+        market_hint: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Get history analysis list.
@@ -231,13 +252,24 @@ class HistoryService:
             end_date: End date (YYYY-MM-DD)
             page: Page number
             limit: Items per page
+            include_ambiguous_numeric_aliases: Whether to include bare numeric
+                aliases that may collide across offshore markets.
+            market_hint: Trusted market identity for candidate expansion. When
+                present, candidates from other indexed markets are excluded.
             
         Returns:
             Dictionary containing total count and items
         """
         try:
             if stock_code:
-                stock_code = self._history_code_filter_candidates(stock_code)
+                stock_code = self._history_code_filter_candidates(
+                    stock_code,
+                    market_hint=market_hint,
+                )
+                if not include_ambiguous_numeric_aliases and not market_hint:
+                    stock_code = [candidate for candidate in stock_code if not candidate.isdigit()]
+                if not stock_code:
+                    return {"total": 0, "items": []}
 
             # Parse date parameters
             start_dt = None
@@ -572,6 +604,18 @@ class HistoryService:
         except Exception as e:
             logger.error(f"根据 ID 查询历史详情失败: {e}", exc_info=True)
             return None
+
+    def get_latest_fundamental_snapshot(
+        self,
+        *,
+        query_id: str,
+        stock_code: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Read the same persisted fundamental fallback used by history detail APIs."""
+        return self.db.get_latest_fundamental_snapshot(
+            query_id=query_id,
+            code=stock_code,
+        )
 
     @staticmethod
     def _normalize_display_sniper_value(value: Any) -> Optional[str]:

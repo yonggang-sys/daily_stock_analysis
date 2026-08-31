@@ -94,8 +94,14 @@ class TestBuildDailyCodeCandidates:
         assert identity.market == "kr"
         assert identity.code_candidates == ("005930.KS", "005930")
 
-    def test_bare_code_with_unsupported_market_hint_fails_closed(self):
-        assert resolve_daily_stock_identity("005930", market_hint="tw") is None
+    def test_bare_taiwan_code_uses_explicit_market_hint(self):
+        identity = resolve_daily_stock_identity("005930", market_hint="tw")
+
+        assert identity is not None
+        assert identity.normalized_code == "005930"
+        assert identity.market == "tw"
+        assert identity.refill_code == ""
+        assert identity.code_candidates == ("005930",)
 
     def test_cross_market_bare_code_without_hint_fails_closed(self):
         assert resolve_daily_stock_identity("8035") is None

@@ -248,6 +248,19 @@ class AlertApiTestCase(unittest.TestCase):
         self.assertEqual(payload["items"][0]["target"], "300750")
         self.assertEqual(payload["items"][0]["parameters"]["change_pct"], 3.5)
 
+    def test_single_symbol_filter_is_case_insensitive_for_legacy_targets(self) -> None:
+        created = self._create_rule({"target": "Brk.B"})
+
+        resp = self.client.get(
+            "/api/v1/alerts/rules",
+            params={"target_scope": "single_symbol", "target": "BRK.B"},
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["total"], 1)
+        self.assertEqual(resp.json()["items"][0]["id"], created["id"])
+        self.assertEqual(resp.json()["items"][0]["target"], "Brk.B")
+
     def test_create_p5_technical_indicator_rules(self) -> None:
         cases = [
             ("ma_price_cross", {"direction": "above", "window": 20}),

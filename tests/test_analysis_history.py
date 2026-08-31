@@ -80,6 +80,66 @@ class TestHistoryCsiCandidateConvergence(unittest.TestCase):
         candidates = HistoryService._history_code_filter_candidates("csi930956")
         self.assertNotIn("csi930956", candidates)
 
+    def test_market_aware_offshore_lookup_keeps_same_market_bare_numeric_alias(self):
+        db = MagicMock()
+        db.get_analysis_history_paginated.return_value = ([], 0)
+
+        HistoryService(db).get_history_list(
+            stock_code="005930.KS",
+            page=1,
+            limit=5,
+            include_ambiguous_numeric_aliases=False,
+            market_hint="kr",
+        )
+
+        queried_codes = db.get_analysis_history_paginated.call_args.kwargs["code"]
+        self.assertIn("005930.KS", queried_codes)
+        self.assertIn("005930", queried_codes)
+
+    def test_market_hint_blocks_indexed_cross_market_reexpansion(self):
+        db = MagicMock()
+        db.get_analysis_history_paginated.return_value = ([], 0)
+
+        HistoryService(db).get_history_list(
+            stock_code="000660",
+            page=1,
+            limit=5,
+            market_hint="cn",
+        )
+
+        queried_codes = db.get_analysis_history_paginated.call_args.kwargs["code"]
+        self.assertIn("SZ000660", queried_codes)
+        self.assertIn("000660.SZ", queried_codes)
+        self.assertNotIn("000660", queried_codes)
+        self.assertNotIn("000660.KS", queried_codes)
+
+    def test_market_hint_keeps_unambiguous_same_market_bare_numeric_alias(self):
+        db = MagicMock()
+        db.get_analysis_history_paginated.return_value = ([], 0)
+
+        HistoryService(db).get_history_list(
+            stock_code="600519",
+            page=1,
+            limit=5,
+            market_hint="cn",
+        )
+
+        queried_codes = db.get_analysis_history_paginated.call_args.kwargs["code"]
+        self.assertIn("600519", queried_codes)
+
+    def test_empty_market_qualified_candidate_set_fails_closed(self):
+        db = MagicMock()
+
+        result = HistoryService(db).get_history_list(
+            stock_code="AAPL",
+            page=1,
+            limit=5,
+            market_hint="cn",
+        )
+
+        self.assertEqual(result, {"total": 0, "items": []})
+        db.get_analysis_history_paginated.assert_not_called()
+
 
 def _analysis_context_pack_overview() -> dict:
     return {

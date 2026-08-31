@@ -79,6 +79,7 @@ WEB_SETTINGS_HIDDEN_FROM_UI = {
     "USE_PROXY",
     "PROXY_HOST",
     "PROXY_PORT",
+    "SEARXNG_TIMEOUT_SECONDS",
 }
 
 _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {

@@ -354,6 +354,8 @@ jobs:
           BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
           SEARXNG_BASE_URLS: ${{ vars.SEARXNG_BASE_URLS || secrets.SEARXNG_BASE_URLS }}
           SEARXNG_PUBLIC_INSTANCES_ENABLED: ${{ vars.SEARXNG_PUBLIC_INSTANCES_ENABLED || secrets.SEARXNG_PUBLIC_INSTANCES_ENABLED }}
+          # [zhulinsen新增] SearXNG 超时配置
+          SEARXNG_TIMEOUT_SECONDS: ${{ vars.SEARXNG_TIMEOUT_SECONDS || secrets.SEARXNG_TIMEOUT_SECONDS }}
           
           # ==========================================
           # 通知渠道（可同时配置多个，全部推送）
@@ -473,7 +475,7 @@ jobs:
           
         run: |
           # 零 LLM 模式：未配置任何 LLM 密钥时跳过主分析
-          # （secrets 不可用于 step if 条件 → 改在 run 内判断 env 注入值；
+          # （secrets 上下文不可用于 step if 条件 → 改在 run 内判断 env 注入值；
           #  选股/热点等结构化产出由 ci_emit 步独立产出，不依赖此步）
           if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "${LITELLM_API_KEY:-}" ] \
              && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${DEEPSEEK_API_KEY:-}" ] \
