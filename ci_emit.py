@@ -23,9 +23,30 @@ gen_stock_detail.py 的忠实副本，保证「逻辑保持一致」。
 """
 import os, sys, json, re, subprocess, time, io, argparse
 
+# ============================ 环境变量覆写（workflow 注入的网络优化参数）============================
+# 说明：upstream ci_emit.py 的 http_get 默认 timeout=15/retries=3。workflow 层已注入环境变量，
+# 但上游源码不读取。此处在工作流运行前覆写默认值，后续 merge upstream 时冲突风险极小
+# （upstream 除非在同位置添加相同功能的代码，否则不会冲突）。
+_CI_ENV_OVERRIDES = {
+    "timeout": int(os.getenv("HTTP_TIMEOUT", "15")),
+    "retries": int(os.getenv("HTTP_RETRY_TOTAL", "3")),
+    "backoff": float(os.getenv("HTTP_RETRY_BACKOFF", "1.5")),
+    "pool_connections": int(os.getenv("HTTP_POOL_CONNECTIONS", "20")),
+    "pool_maxsize": int(os.getenv("HTTP_POOL_MAXSIZE", "30")),
+    "cache_ttl": int(os.getenv("CACHE_TTL_SECONDS", "300")),
+    "max_concurrent": int(os.getenv("MAX_CONCURRENT_REQUESTS", "10")),
+}
+
+
 # ============================ 工具 ============================
 def http_get(url, timeout=15, retries=3, headers=None, use_curl=False):
-    """返回 (text, ok)。优先 urllib；push2his 等东财接口在部分环境 urllib 被拦，可切 curl。"""
+    """返回 (text, ok)。优先 urllib；push2his 等东财接口在部分环境 urllib 被拦，可切 curl。
+    注：workflow 层注入 HTTP_TIMEOUT / HTTP_RETRY_TOTAL / HTTP_RETRY_BACKOFF 环境变量，
+    若存在则覆盖此处默认值，使 CI 侧无需改动源码即可调整网络策略。"""
+    # workflow 注入的网络优化参数（若 workflow 未设置，则回退到默认值）
+    timeout = _CI_ENV_OVERRIDES.get("timeout", timeout)
+    retries = _CI_ENV_OVERRIDES.get("retries", retries)
+    backoff = _CI_ENV_OVERRIDES.get("backoff", 1.5)
     hd = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.qq.com/"}
     if headers:
         hd.update(headers)
@@ -57,7 +78,7 @@ def http_get(url, timeout=15, retries=3, headers=None, use_curl=False):
                 return raw.decode("gbk", "ignore"), True
         except Exception as e:
             last = f"{type(e).__name__}: {e}"
-            time.sleep(1.5 * (i + 1))
+            time.sleep(backoff * (i + 1))
     return "", False
 
 
