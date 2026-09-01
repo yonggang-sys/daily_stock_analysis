@@ -24,10 +24,10 @@ on:
         default: false
         type: boolean
 
-# 并发控制：同一时间只运行一个分析任务
+# 并发控制：同一时间只运行一个分析任务；区分事件来源，避免 schedule 与 dispatch 互相阻塞
 concurrency:
-  group: stock-analysis
-  cancel-in-progress: false
+  group: stock-analysis-${{ github.event_name }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
@@ -64,16 +64,19 @@ jobs:
       
       - name: 创建必要目录
         run: |
-          mkdir -p data logs reports
+          mkdir -p data logs reports .cache
+
+      - name: 设置日期环境变量
+        run: echo "TODAY=$(date +%Y%m%d)" >> $GITHUB_ENV
 
       - name: 恢复数据缓存
         uses: actions/cache@v5
         with:
           path: |
             data/
-          key: stock-data-${{ github.run_id }}-${{ github.run_attempt }}
+            .cache/
+          key: stock-data-${{ env.TODAY }}
           restore-keys: |
-            stock-data-${{ github.run_id }}-
             stock-data-
 
       - name: Key 连通性预检
@@ -637,14 +640,25 @@ jobs:
         # 零 LLM 模式：main.py 可能在无 key 时跳过，此处始终运行以产出选股 reco.json。
         if: always()
         id: ci_emit
+        env:
+          # 网络优化：超时、重试、连接池、缓存 TTL
+          HTTP_TIMEOUT: ${{ vars.HTTP_TIMEOUT || '30' }}
+          HTTP_RETRY_TOTAL: ${{ vars.HTTP_RETRY_TOTAL || '3' }}
+          HTTP_RETRY_BACKOFF: ${{ vars.HTTP_RETRY_BACKOFF || '2' }}
+          HTTP_POOL_CONNECTIONS: ${{ vars.HTTP_POOL_CONNECTIONS || '20' }}
+          HTTP_POOL_MAXSIZE: ${{ vars.HTTP_POOL_MAXSIZE || '30' }}
+          CACHE_TTL_SECONDS: ${{ vars.CACHE_TTL_SECONDS || '300' }}
+          # 异步并发（ci_emit.py 若支持则读取）
+          MAX_CONCURRENT_REQUESTS: ${{ vars.MAX_CONCURRENT_REQUESTS || '10' }}
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
             echo "ci_emit 尝试 $attempt/3..."
             python ci_emit.py && break
             if [ $attempt -lt 3 ]; then
-              echo "⏳ 等待 30 秒后重试..."
-              sleep 30
+              WAIT=$((60 * attempt))
+              echo "⏳ 等待 ${WAIT} 秒后重试..."
+              sleep ${WAIT}
             fi
           done
           echo "✅ ci_emit 完成（reco/hotspot/holding_fundflow/latest.meta）"
