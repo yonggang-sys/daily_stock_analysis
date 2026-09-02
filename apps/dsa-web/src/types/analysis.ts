@@ -84,6 +84,7 @@ export interface ReportMeta {
   changePct?: number;
   modelUsed?: string;  // 历史元数据快照，仅用于展示，不用于运行时模型选择
   marketPhaseSummary?: MarketPhaseSummary | null;
+  assetType?: 'stock' | 'index';  // 后端权威资产类型；index 用于隐藏 stock-only 自选操作
 }
 
 /** Sentiment label */
@@ -439,6 +440,7 @@ export interface BatchTaskAcceptedItem {
   status: 'pending' | 'processing';
   message?: string;
   analysisPhase?: AnalysisPhase;
+  assetType?: 'stock' | 'index';
 }
 
 export interface BatchDuplicateTaskItem {
@@ -447,9 +449,15 @@ export interface BatchDuplicateTaskItem {
   message: string;
 }
 
+export interface BatchRejectedTaskItem {
+  stockCode: string;
+  message: string;
+}
+
 export interface BatchTaskAcceptedResponse {
   accepted: BatchTaskAcceptedItem[];
   duplicates: BatchDuplicateTaskItem[];
+  rejected?: BatchRejectedTaskItem[];
   message: string;
 }
 
@@ -494,6 +502,7 @@ export interface TaskInfo {
   analysisPhase?: AnalysisPhase;
   skills?: string[];
   region?: string;
+  assetType?: 'stock' | 'index';
 }
 
 /** Task list response */
@@ -534,6 +543,7 @@ export interface HistoryItem {
   turnoverRate?: number;
   modelUsed?: string;  // 历史元数据快照，仅用于列表展示，不影响运行时调用与路由
   marketPhaseSummary?: MarketPhaseSummary | null;
+  assetType?: 'stock' | 'index';
   createdAt: string;
 }
 
@@ -595,6 +605,7 @@ export interface StockBarItem {
   lastAnalysisTime?: string;
   modelUsed?: string;
   marketPhaseSummary?: MarketPhaseSummary | null;
+  assetType?: 'stock' | 'index';
 }
 
 export interface StockBarResponse {

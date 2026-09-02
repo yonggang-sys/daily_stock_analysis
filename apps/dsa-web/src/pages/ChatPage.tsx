@@ -27,7 +27,12 @@ import {
 import { isNearBottom } from '../utils/chatScroll';
 import { getReportText } from '../utils/reportLanguage';
 import { extractStockCodesFromMessage } from '../utils/chatStockCode';
-import { findMatchingStockCode, includesStockCode, normalizeStockCode } from '../utils/stockCode';
+import {
+  findMatchingStockCode,
+  includesStockCode,
+  normalizeStockCode,
+  resolveRegisteredIndexCanonical,
+} from '../utils/stockCode';
 import { useStockIndex } from '../hooks/useStockIndex';
 import type { StockIndexItem } from '../types/stockIndex';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
@@ -78,11 +83,31 @@ const resolveUniqueStockNameContext = (
     if (!terms.some((term) => normalizedMessage.includes(term.toLocaleLowerCase()))) {
       continue;
     }
-    const stockCode = normalizeStockCode(item.canonicalCode);
+    // Index canonical codes (sh000001 / csi930955) must be preserved verbatim —
+    // normalizeStockCode would strip the exchange prefix and collide with a
+    // same-digit stock (sh000001 → 000001 vs 平安银行 000001).
+    const stockCode = item.assetType === 'index'
+      ? item.canonicalCode
+      : normalizeStockCode(item.canonicalCode);
     matches.set(stockCode, { stock_code: stockCode, stock_name: item.nameZh || null });
   }
 
   return matches.size === 1 ? [...matches.values()][0] : null;
+};
+
+/**
+ * Determine whether an active stock code resolves to a registered index.
+ *
+ * Only an exact registry canonical/display/explicit-alias hit counts; bare
+ * same-digit stocks must never be typed as indexes through normalization or
+ * prefix guessing. Stock-only watchlist actions are hidden for these matches.
+ */
+const isRegisteredIndexCanonicalCode = (
+  code: string | null,
+  index: StockIndexItem[],
+): boolean => {
+  if (!code) return false;
+  return resolveRegisteredIndexCanonical(index, code) !== null;
 };
 
 const getMessageSkillNames = (msg: Message): string[] => {
@@ -113,15 +138,28 @@ const getPipelineBudgetSkippedLabel = (step: ProgressStep): string => {
   return `${step.stage || 'pipeline'} skipped: insufficient budget`;
 };
 
+// Comparison identity key: registry canonical first (so an index context keeps
+// its lowercase canonical and never normalizes into the bare same-code stock),
+// then the stock normalization fallback. Never guesses index types from prefixes.
+const resolveComparisonStockKey = (
+  code: string | null | undefined,
+  index: StockIndexItem[],
+): string | null => {
+  if (!code) return null;
+  const trimmed = code.trim();
+  if (!trimmed) return null;
+  return resolveRegisteredIndexCanonical(index, trimmed) ?? normalizeStockCode(trimmed);
+};
+
 const isCompareStockMessage = (
   message: string,
   stockCodes: string[],
-  currentStockCode?: string | null,
+  currentStockKey?: string | null,
 ): boolean => {
   if (STRONG_COMPARE_STOCK_MESSAGE_RE.test(message)) {
     return true;
   }
-  const current = currentStockCode ? normalizeStockCode(currentStockCode) : null;
+  const current = currentStockKey ?? null;
   const newStockCodes = current
     ? stockCodes.filter((code) => code !== current)
     : stockCodes;
@@ -137,7 +175,7 @@ const isCompareStockMessage = (
   if (stockCodes.length >= 2) {
     return true;
   }
-  if (!currentStockCode) {
+  if (!currentStockKey) {
     return false;
   }
   const hasNewStock = stockCodes.some((code) => code !== current);
@@ -147,26 +185,27 @@ const isCompareStockMessage = (
 const resolveActiveStockContextFromMessage = (
   message: string,
   currentContext: ActiveStockContext | null,
+  index: StockIndexItem[],
 ): ActiveStockResolution | null => {
-  const stockCodes = extractStockCodesFromMessage(message);
+  const stockCodes = extractStockCodesFromMessage(message, index);
   const stockCode = stockCodes[0] ?? null;
   if (!stockCode) {
     return null;
   }
 
-  const isCompare = isCompareStockMessage(message, stockCodes, currentContext?.stock_code);
+  // Registry-first identity keys so an index context (sh000016) is never
+  // folded with the bare same-code stock when comparing or switching.
+  const currentStockKey = resolveComparisonStockKey(currentContext?.stock_code, index);
+  const isCompare = isCompareStockMessage(message, stockCodes, currentStockKey);
   const isSwitch = SWITCH_STOCK_MESSAGE_RE.test(message);
-  const currentStockCode = currentContext?.stock_code
-    ? normalizeStockCode(currentContext.stock_code)
-    : null;
-  const newStockCodes = currentStockCode
-    ? stockCodes.filter((code) => code !== currentStockCode)
+  const newStockCodes = currentStockKey
+    ? stockCodes.filter((code) => code !== currentStockKey)
     : stockCodes;
   // Explicit switches can mention the old stock; use the single new code when present.
   const targetStockCode = isSwitch && newStockCodes.length === 1
     ? newStockCodes[0]
     : stockCode;
-  const isDifferentStock = currentStockCode !== targetStockCode;
+  const isDifferentStock = currentStockKey !== resolveComparisonStockKey(targetStockCode, index);
 
   // Compare messages and implicit follow-ups must not rewrite the active stock context.
   if (isCompare || (currentContext && !isSwitch)) {
@@ -185,13 +224,16 @@ const resolveActiveStockContextFromMessage = (
   };
 };
 
-const restoreActiveStockContextFromMessages = (messages: Message[]): ActiveStockContext | null => {
+const restoreActiveStockContextFromMessages = (
+  messages: Message[],
+  index: StockIndexItem[],
+): ActiveStockContext | null => {
   let restoredContext: ActiveStockContext | null = null;
   for (const message of messages) {
     if (message.role !== 'user') {
       continue;
     }
-    const resolution = resolveActiveStockContextFromMessage(message.content, restoredContext);
+    const resolution = resolveActiveStockContextFromMessage(message.content, restoredContext, index);
     if (resolution) {
       restoredContext = resolution.context;
     }
@@ -233,9 +275,9 @@ const ChatPage: React.FC = () => {
   const [agentStatus, setAgentStatus] = useState<AgentStatusResponse | null>(null);
   const [agentStatusError, setAgentStatusError] = useState<string | null>(null);
   const [agentStatusChecking, setAgentStatusChecking] = useState(true);
-  const { index: stockIndex } = useStockIndex(
-    agentStatus?.backend === 'codex_app_server',
-  );
+  // All Chat backends need the registry before resolving stock identity.
+  const { index: stockIndex, loading: stockIndexLoading } = useStockIndex();
+
   const watchlistMessageTimerRef = useRef<number | null>(null);
   const copyResetTimerRef = useRef<Partial<Record<string, number>>>({});
   const messagesViewportRef = useRef<HTMLDivElement>(null);
@@ -365,13 +407,16 @@ const ChatPage: React.FC = () => {
     if (activeStockContext || messages.length === 0) {
       return;
     }
-    const restoredContext = restoreActiveStockContextFromMessages(messages);
+    if (stockIndexLoading) {
+      return;
+    }
+    const restoredContext = restoreActiveStockContextFromMessages(messages, stockIndex);
     if (!restoredContext) {
       return;
     }
     setActiveStockContext(restoredContext);
     setActiveStockCode(restoredContext.stock_code);
-  }, [activeStockContext, messages, sessionId]);
+  }, [activeStockContext, messages, sessionId, stockIndex, stockIndexLoading]);
 
   const syncScrollState = useCallback(() => {
     const viewport = messagesViewportRef.current;
@@ -632,7 +677,33 @@ const ChatPage: React.FC = () => {
 
   // Handle follow-up from report page: ?stock=600519&name=贵州茅台&recordId=xxx
   useEffect(() => {
-    const stock = sanitizeFollowUpStockCode(searchParams.get('stock'));
+    const rawStockCode = searchParams.get('stock');
+    if (!rawStockCode) {
+      // Nothing to follow up — only clear when there actually ARE stale query
+      // params. Skipping the empty case avoids redundant `replace: true`
+      // navigations on every effect re-run (the gate below legitimately re-runs
+      // as status/registry state settles), which would otherwise clobber
+      // subsequent RouterProvider navigation state asserted by other tests.
+      if (searchParams.size === 0) {
+        return;
+      }
+      setSearchParams({}, { replace: true });
+      return;
+    }
+
+    if (stockIndexLoading) {
+      return;
+    }
+    if (agentStatusChecking) {
+      return;
+    }
+
+    // Registry canonical first for explicit index follow-ups (sh000016 /
+    // 000016.SH / 930955.CSI / csi930955) so the report-follow-up canonical is
+    // preserved end-to-end; the sanitize contract is untouched and remains the
+    // stock fail-open when the registry is unavailable or the code unregistered.
+    const registryCanonical = resolveRegisteredIndexCanonical(stockIndex, rawStockCode);
+    const stock = registryCanonical ?? sanitizeFollowUpStockCode(rawStockCode);
     const name = sanitizeFollowUpStockName(searchParams.get('name'));
     const recordId = parseFollowUpRecordId(searchParams.get('recordId'));
 
@@ -670,7 +741,7 @@ const ChatPage: React.FC = () => {
       }
     });
     setSearchParams({}, { replace: true });
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setSearchParams, stockIndex, stockIndexLoading, agentStatusChecking]);
 
   const handleSend = useCallback(
     async (
@@ -679,7 +750,7 @@ const ChatPage: React.FC = () => {
       overrideStockContext?: ActiveStockContext,
     ) => {
       const msgText = (overrideMessage ?? input).trim();
-      if (!msgText || loading || !agentAvailable || !agentStatus) return;
+      if (!msgText || loading || stockIndexLoading || !agentAvailable || !agentStatus) return;
       if (overrideMessage !== undefined) {
         setInput(msgText);
       }
@@ -696,7 +767,7 @@ const ChatPage: React.FC = () => {
       let useActiveContextForThisSend = Boolean(codexStockContext);
       const stockResolution = codexStockContext
         ? null
-        : resolveActiveStockContextFromMessage(msgText, activeStockContext);
+        : resolveActiveStockContextFromMessage(msgText, activeStockContext, stockIndex);
       if (stockResolution) {
         nextActiveStockContext = stockResolution.context;
         useActiveContextForThisSend = stockResolution.useForCurrentSend;
@@ -740,7 +811,7 @@ const ChatPage: React.FC = () => {
         },
       });
     },
-    [activeStockContext, agentAvailable, agentStatus, getSkillNames, input, loading, normalizeSelectedSkillIds, requestScrollToBottom, selectedSkillIds, sessionId, sessionSelectedSkillIds, startStream, stockIndex],
+    [activeStockContext, agentAvailable, agentStatus, getSkillNames, input, loading, normalizeSelectedSkillIds, requestScrollToBottom, selectedSkillIds, sessionId, sessionSelectedSkillIds, startStream, stockIndex, stockIndexLoading],
   );
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1281,7 +1352,7 @@ const ChatPage: React.FC = () => {
                         <button
                           key={i}
                           onClick={() => handleQuickQuestion(q)}
-                          disabled={!agentAvailable}
+                          disabled={!agentAvailable || stockIndexLoading}
                           className="quick-question-btn disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           {q.label}
@@ -1619,7 +1690,7 @@ const ChatPage: React.FC = () => {
                 </div>
               )}
 
-            {activeStockCode && (
+            {activeStockCode && !isRegisteredIndexCanonicalCode(activeStockCode, stockIndex) && (
               <div className="flex items-center gap-2">
                 <span className="text-xs text-muted-text font-mono">{activeStockCode}</span>
                 <Button
@@ -1666,8 +1737,8 @@ const ChatPage: React.FC = () => {
                   <Button
                     variant="primary"
                     onClick={() => handleSend()}
-                    disabled={!input.trim() || loading || !agentAvailable}
-                    isLoading={loading}
+                    disabled={!input.trim() || loading || stockIndexLoading || !agentAvailable}
+                    isLoading={loading || stockIndexLoading}
                     className="btn-primary flex-shrink-0"
                   >
                     发送

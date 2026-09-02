@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [修复] 将 litellm 依赖窗口上界收敛到 `<1.99.0`：1.99.0 起把 `prompt_cache_key` 透传给 OpenAI provider，破坏 provider 缓存测试对不透传行为的既有断言（CI backend-tests 3/3 与 backend-gate 失败）；保留历史最低版本与 `!=1.82.7`/`!=1.82.8` 事故排除，同时同步更新各 LLM 兼容文档中写死的依赖约束表述，避免文档与 requirements.txt 漂移
+
 - [新功能] 新增 `SEARXNG_TIMEOUT_SECONDS` 配置自建 SearXNG 单次搜索超时（默认 10 秒），已接线全部 SearchService 构造入口（含题材搜索子进程重建）与默认 GitHub Actions 工作流
 
 - [修复] 美股日线路由现按各数据源当前优先级排序，单项 `*_PRIORITY` 配置（如 `YFINANCE_PRIORITY=0`）对美股即时生效；指数固定首选与 Longbridge preferred 语义保持不变
@@ -45,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 阻止任意更新的非 bundled 指数候选（含 legacy `static` 子集）在 remote 缺失/损坏时以 active-index 子集覆盖 bundled baseline：所有非 bundled 候选必须为 bundled active-index canonical 集合的合法超集，否则回退 bundled 并记录 WARNING。
 - [新功能] 桌面端全局右上角增加更新入口，与设置页共用更新状态；普通浏览器 WebUI 不展示，且不会在挂载时重复触发后台检查。
 - [修复] 桌面端右上角更新入口与设置页共用检查中状态，避免一侧检查时另一侧仍可重复触发 GitHub Releases 检查；主进程手动检查路径同步增加 in-flight 防重。
+- [新功能] Web 自动补全与搜索放行已登记指数（注册中文名/`sh`/`sz` 前缀/`csi`/`.CSI` 显式形式均可检索与提交），热门候选仍仅股票；`/analyze` API 对显式指数输入构造结构化 `AnalysisTarget`（INDEX 用 `canonical_id` 去重，与同码个股互不折叠，CSI alias 收敛），未登记 CSI 单请求返回明确 4xx、异步批量仅该目标进入响应 `rejected` 列表；指数 target 经任务队列贯穿到 Pipeline `process_single_stock`，`DecisionSignal` 以 `market_override="cn"` 落库并有真实分支测试。
+- [修复] `/analyze` 在解析前按 strip 后非空原始 token 数限制 50 上限，rejected/duplicate token 也计入，防止用拒绝或重复 token 绕过批量上限；以唯一 `is_single = len(stock_codes) == 1 and not rejected_entries` 统一驱动 metadata、409 与单任务 202，duplicate+rejected 混合批次不再误返 legacy 409（单 duplicate 仍 409、部分 rejected 仍 202、全 rejected 仍 400）。
+- [新功能] 报告 meta 补充可选 `asset_type`（`stock`/`index`），由后端 canonical code 经 `parse_analysis_target` 生成权威类型；指数报告在 Web 报告页与 Chat 自选入口隐藏 stock-only 自选操作，裸同码股票（如 `000016`）保持股票行为，market review 与旧客户端可缺省。
+- [修复] Web 批量分析把 accepted/duplicates/rejected 三类计入确认数，含 rejected 的完整 chunk 继续提交下一 chunk 而非误报 incomplete，最终以 warning 展示拒绝数量与首个拒绝原因（中英文文案）。
+- [修复] 历史筛选/删除/计数与 stock-bar 对已登记指数按 parser canonical 身份隔离：`sh000016`/`SH000016`/`000016.SH` 等显式形态互相可达（lowercase canonical + uppercase legacy canonical + 显式 alias），但永远不命中同码裸股票，裸码查询也不会命中指数记录；同一指数多条显式形态旧记录在 `/history/stocks` 合并为一行并计数全部形态，无记录删除仍返回 `deleted=0`。SH/SZ/CSI 共用同一 parser 分支，股票 alias、港股与海外市场行为不变。历史列表、历史详情与 stock-bar 对已登记指数（含旧 uppercase/显式 alias 持久化记录，如 `SZ399300`、`000300.CSI`）的 API `stock_code` 一律输出 parser canonical（`sh000300`/`csi930955`）。
+- [改进] 任务列表/SSE 事件、历史列表项与 stock-bar 项追加可选 `asset_type`（`stock`/`index`）：任务侧从已提交的 `analysis_target` 透传（不重新猜测），历史与 stock-bar 侧由持久化 `record.code` 经 `parse_analysis_target` 生成；旧客户端与 market review 可缺省，字段可选追加不破坏既有契约。
+- [修复] Web 首页与自选工作区改用资产感知身份键：任务/报告/历史的 `assetType` 优先，且被后端保证为 parser canonical 的代码只做**大小写折叠**（`SH000016`→`sh000016`），禁止再用前缀/后缀正则猜 canonical（否则 `000300.CSI` 会被误猜成 `csi000300`、`sz399300` 被误当成独立 canonical，违反注册表唯一判型真源）；仅 watchlist 原始字符串缺少类型时，才用已加载 `stocks.index.json` 的 `assetType=index` 行 canonical/display/显式 alias 精确命中（不先 normalize、不用前缀正则猜测；加载期间禁用批量分析，加载失败或请求超过 10 秒时按既有股票语义 fail-open）；行选中、active task 与完成自动选中按资产类型分桶，`sh000016` 指数行与 `000016` 股票行状态独立，完成后自动选中正确 canonical 指数报告。
+- [修复] Chat 消息恢复、发送与报告追问对显式 SH/SZ/CSI 已登记指数统一按注册表 canonical 判型并覆盖默认 LiteLLM 与 Codex：所有 Chat 后端首帧加载 registry，加载期间延迟 URL/历史恢复并禁用发送，settle 后 `sh000016`/`sz399001`/`000016.SH`/`930955.CSI`/`csi930955` 只产出一个 lowercase canonical；后端 `resolve_stock_scope`、工具守卫与 cache key 复用 parser `INDEX` 身份，保持指数与裸同码股票隔离；未登记、空 registry 或加载失败时维持既有股票 fail-open，绝不按前缀猜指数。
 
 ## [3.31.0] - 2026-08-23
 
