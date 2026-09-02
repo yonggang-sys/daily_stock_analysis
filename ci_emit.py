@@ -20,8 +20,15 @@ ci_emit.py — CI 端取数 + 产出（替代本地 westock 管线）。
 
 评分/筛选/产出逻辑均为本地 build_reco.py / holding_fundflow.py / build_report3.py /
 gen_stock_detail.py 的忠实副本，保证「逻辑保持一致」。
+
+优化（并行化）：
+  - fetch_em_valuation / fetch_kline_52 / fetch_em_fundflow / fetch_board_members
+    全部改用 ThreadPoolExecutor 并行，线程数由 MAX_CONCURRENT_REQUESTS 环境变量控制（默认 10）。
+  - fetch_em_fundflow 增加 push2his 多主机 fallback（与 em_clist_items 同策略）。
+  - 预期：原串行 ~70s/股 → 并行后 ≈ 70s / max_workers，整体 ci_emit 从 ~900s 降至 ~120-200s。
 """
 import os, sys, json, re, subprocess, time, io, argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================ 环境变量覆写（workflow 注入的网络优化参数）============================
 # 说明：upstream ci_emit.py 的 http_get 默认 timeout=15/retries=3。workflow 层已注入环境变量，
@@ -99,6 +106,38 @@ def em_secid(code):
     return ("1." if str(code).startswith(("6", "9")) else "0.") + str(code)
 
 
+def _parallel_map(items, worker_fn, max_workers=None):
+    """通用并行映射适配器。
+    items: 可迭代对象（每元素传给 worker_fn；若元素是 tuple 则 *item 展开）。
+    worker_fn: 返回任意结果（异常时该位返回 None）。
+    返回与 items 等长、保序的结果列表。
+    max_workers 默认取 _CI_ENV_OVERRIDES['max_concurrent']。"""
+    items = list(items)
+    n = len(items)
+    if n == 0:
+        return []
+    if max_workers is None:
+        max_workers = _CI_ENV_OVERRIDES.get("max_concurrent", 10)
+    max_workers = max(1, min(max_workers, n))
+    results = [None] * n
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_idx = {}
+        for i, item in enumerate(items):
+            if isinstance(item, tuple):
+                fut = pool.submit(worker_fn, *item)
+            else:
+                fut = pool.submit(worker_fn, item)
+            future_to_idx[fut] = i
+        for fut in as_completed(future_to_idx):
+            i = future_to_idx[fut]
+            try:
+                results[i] = fut.result()
+            except Exception as e:
+                print(f"[warn] parallel fetch error at index {i}: {type(e).__name__}: {e}")
+                results[i] = None
+    return results
+
+
 # ============================ 取数（仅 CI 出网环境有效）============================
 QT_BULK = "https://qt.gtimg.cn/q="  # codes 逗号分隔，如 sh601318,sz000001
 KLINE = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,320,qfq"
@@ -112,6 +151,9 @@ EM_FLOW = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=30
 # clist 类请求依次换主机重试可绕开（run 116 实证：clist 静默空 → 热点 0 条）。
 EM_PUSH2_HOSTS = ["push2.eastmoney.com", "1.push2.eastmoney.com",
                   "2.push2.eastmoney.com", "push2delay.eastmoney.com"]
+# push2his 同样有多组等价主机，资金流接口限流时换主机重试。
+EM_PUSH2HIS_HOSTS = ["push2his.eastmoney.com", "1.push2his.eastmoney.com",
+                     "2.push2his.eastmoney.com", "push2delay.eastmoney.com"]
 
 
 def em_clist_items(url):
@@ -202,14 +244,13 @@ def fetch_kline_52(code):
 
 
 def fetch_em_valuation(codes):
-    """codes: list['601318', ...] -> {code: {name,pe,pb,div,mv}}  东财单股（补充股息率）。"""
-    out = {}
-    for code in codes:
+    """codes: list['601318', ...] -> {code: {name,pe,pb,div,mv}}  东财单股（补充股息率）— 并行。"""
+    def _fetch_one(code):
         sec = em_secid(code)
         url = EM_SINGLE.format(secid=sec)
         txt, ok = http_get(url, timeout=12)
         if not ok:
-            continue
+            return None
         try:
             d = json.loads(txt).get("data") or {}
             name = d.get("f58") or ""
@@ -218,10 +259,12 @@ def fetch_em_valuation(codes):
             div_raw = num(d.get("f162"))
             div = (div_raw / 100.0) if (div_raw is not None and div_raw > 50) else div_raw  # f162 常为百分号×100
             mv = num(d.get("f116"))
-            out[code] = {"name": name, "pe": None, "pb": None, "div": div, "mv": (mv / 1e8) if mv else None}
+            return {"name": name, "pe": None, "pb": None, "div": div, "mv": (mv / 1e8) if mv else None}
         except Exception:
-            continue
-    return out
+            return None
+
+    results = _parallel_map(list(codes), _fetch_one)
+    return {code: r for code, r in zip(codes, results) if r is not None}
 
 
 def _valid_chg(v, limit=15.0):
@@ -297,13 +340,38 @@ def fetch_board_members(bk_code):
 
 
 def fetch_em_fundflow(code):
-    """东财个股主力资金流（日级）-> {1d,3d,5d,10d,20d} 主力净流入(元)。push2his。"""
+    """东财个股主力资金流（日级）-> {1d,3d,5d,10d,20d} 主力净流入(元)。push2his 多主机重试。"""
+    from urllib.parse import urlsplit, urlunsplit
     sec = em_secid(code)
-    url = EM_FLOW.format(secid=sec)
-    txt, ok = http_get(url, timeout=20, use_curl=True)
-    if not ok:
-        # 回退 urllib
-        txt, ok = http_get(url, timeout=20, use_curl=False)
+    base_url = EM_FLOW.format(secid=sec)
+    sp = urlsplit(base_url)
+    txt, ok = "", False
+    for i, host in enumerate(EM_PUSH2HIS_HOSTS):
+        u = base_url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
+        # curl 优先（push2his 对 urllib 有时静默断连）
+        txt, ok = http_get(u, timeout=20, use_curl=True)
+        if not ok:
+            # 回退 urllib
+            txt, ok = http_get(u, timeout=20, use_curl=False)
+        if not ok:
+            print(f"[warn] fundflow {code} host {host}: http_get 失败（超时/连接重置）")
+            continue
+        # 校验返回数据非空（限流时空响应）
+        try:
+            j_test = json.loads(txt)
+            klines = (j_test.get("data") or {}).get("klines") or []
+            if klines:
+                if i > 0:
+                    print(f"[info] fundflow {code} 主机 fallback 生效: {host}（{len(klines)} 条）")
+                break
+            else:
+                print(f"[warn] fundflow {code} host {host}: klines 为空（疑似限流）")
+                txt, ok = "", False
+                continue
+        except Exception:
+            print(f"[warn] fundflow {code} host {host}: JSON 解析失败")
+            txt, ok = "", False
+            continue
     if not ok:
         return None
     try:
@@ -630,20 +698,28 @@ def build_hotspot_leaders(ws, name_to_code=None):
 def build_holding_fundflow(ws, codes, names=None):
     """codes: 裸码列表（如 ['601318','000001']，= 候选宇宙含 ci_universe_extra 的持仓/观测股）。
     用东财 push2his 主力净流入 + qt 报价，复刻 holding_fundflow.json schema（key=裸码）。
-    与本地 holding_fundflow.py 输出字段完全一致；仪表盘按持仓裸码查表即可。"""
+    与本地 holding_fundflow.py 输出字段完全一致；仪表盘按持仓裸码查表即可。
+
+    优化：资金流 + K线 并行抓取（原串行逐股 ~70s/股 → 并行后 ≈ 70s/max_workers）。"""
     names = names or {}
     out = {}
     sym_map = [(c, sh_prefix(c)) for c in codes]
     qt = fetch_qt_bulk([s for _, s in sym_map])
-    for bare, sym in sym_map:
-        fl = fetch_em_fundflow(bare)
+    # 并行抓取资金流 + K线（两个独立批次，互不依赖）
+    t_ff = time.time()
+    fl_list = _parallel_map(sym_map, lambda bare, sym: fetch_em_fundflow(bare))
+    kl_list = _parallel_map(sym_map, lambda bare, sym: fetch_kline_52(sym))
+    print(f"[info] 资金流+K线并行抓取完成: {len(sym_map)} 只, 耗时 {int(time.time()-t_ff)}s")
+    for idx, (bare, sym) in enumerate(sym_map):
+        fl = fl_list[idx] if idx < len(fl_list) else None
         if fl is None:
             print(f"[warn] fundflow {bare}: push2his 无数据（限流/接口失败），主力净额按 0 计")
         q = qt.get(sym, {})
-        k = fetch_kline_52(sym)
+        k = kl_list[idx] if idx < len(kl_list) else None
+        k = k or {}
         price = q.get("price") or 0
-        high52 = (k or {}).get("high52") or 0
-        low52 = (k or {}).get("low52") or 0
+        high52 = k.get("high52") or 0
+        low52 = k.get("low52") or 0
         circ_mv_raw = q.get("circ_mv") or q.get("mv")  # 亿元（qt f44 流通市值 / f45 总市值，已是亿元）
         main1 = (fl or {}).get("1d", 0.0) or 0.0
         main3 = (fl or {}).get("3d", 0.0) or 0.0
@@ -863,10 +939,15 @@ def run_full(ws):
         all_codes += [c for c in codes.split(",") if c]
     bare = [c[2:] for c in all_codes]
     qt = fetch_qt_bulk(all_codes)
-    kls = {}
-    for c in all_codes:
-        kls[c] = fetch_kline_52(c)
+    # K线并行抓取（原串行逐股，~3-5s/股 × N 只 → 并行后 ≈ 单批耗时）
+    t_kl = time.time()
+    kls_list = _parallel_map(all_codes, lambda c: fetch_kline_52(c))
+    kls = {c: kls_list[i] for i, c in enumerate(all_codes)}
+    print(f"[info] K线并行抓取完成: {len(all_codes)} 只, 耗时 {int(time.time()-t_kl)}s")
+    # 东财估值并行抓取
+    t_emv = time.time()
     emv = fetch_em_valuation(bare)
+    print(f"[info] 东财估值并行抓取完成: {len(bare)} 只, 耗时 {int(time.time()-t_emv)}s")
     rows = {}
     for c in all_codes:
         bare_c = c[2:]
@@ -899,11 +980,15 @@ def run_full(ws):
         if not leads:
             leads = fetch_em_hotspot()
     emit_hot_board(f"{ws}/_hot_board.md", boards)
-    # 板块成分映射：对 top10 热点行业逐个拉成分股（东财板块成分接口），
+    # 板块成分映射：对 top10 热点行业并行拉成分股（东财板块成分接口），
     # 将 universe 中命中成分的股票映射到板块名（旧版用「板块名 in 股票名」子串匹配，恒为空）
+    top_boards = boards[:10]
+    t_bm = time.time()
+    member_list = _parallel_map(top_boards, lambda b: fetch_board_members(b.get("code")))
+    print(f"[info] 板块成分并行抓取完成: {len(top_boards)} 个板块, 耗时 {int(time.time()-t_bm)}s")
     hot_sec = {}
-    for b in boards[:10]:
-        members = fetch_board_members(b.get("code"))
+    for i, b in enumerate(top_boards):
+        members = member_list[i]
         if not members:
             continue
         for c in all_codes:
