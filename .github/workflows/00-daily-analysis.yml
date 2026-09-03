@@ -1,11 +1,13 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 北京时间 08:30 11:45 15:30
-  schedule:
-    - cron: '30 0 * * 1-5'     # 北京 08:30 - 盘前
-    - cron: '45 3 * * 1-5'     # 北京 11:45 - 午盘复盘
-    - cron: '30 7 * * 1-5'     # 北京 15:30 - 收盘
+  # 外部定时触发（repository_dispatch）— 不再依赖 GitHub 内置 cron，避免延迟/堆积问题
+  # 外部定时器（如 cron-job.org / UptimeRobot / 自建 cron）在精确时间向 GitHub API
+  # POST /repos/yonggang-sys/daily_stock_analysis/dispatches 触发。
+  # 定时保留 3 段（北京 08:30 盘前 / 11:45 午盘复盘 / 15:30 收盘），
+  # 但不再由 schedule: 触发，改由外部定时器带 trigger_source 参数触发。
+  repository_dispatch:
+    types: [daily-stock-analysis]
   # 手动触发
   workflow_dispatch:
     inputs:
@@ -44,7 +46,19 @@ jobs:
       contents: write
 
     steps:
+      - name: 记录触发来源
+        run: |
+          echo "=========================================="
+          echo "🚀 触发来源: ${{ github.event_name }}"
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "⏰ 定时时段: ${{ github.event.client_payload.trigger_source || 'unknown' }}"
+            echo "📅 计划时间: ${{ github.event.client_payload.scheduled_at || 'unknown' }}"
+          fi
+          echo "=========================================="
+      
       - name: 随机延迟（避免固定时间访问）
+        # 外部定时触发时跳过随机延迟（外部已精确控制时间）
+        if: github.event_name != 'repository_dispatch'
         run: sleep $((RANDOM % 60))  # 随机延迟0-60秒启动
       
       - name: 检出代码
@@ -508,7 +522,14 @@ jobs:
           fi
 
           # 判断运行模式
-          MODE="${{ github.event.inputs.mode || 'full' }}"
+          # repository_dispatch 时，外部定时器通过 client_payload.mode 指定模式
+          # workflow_dispatch 时，用户通过 inputs.mode 选择
+          # 默认 full
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            MODE="${{ github.event.client_payload.mode || 'full' }}"
+          else
+            MODE="${{ github.event.inputs.mode || 'full' }}"
+          fi
           
           echo "=========================================="
           echo "🚀 A股自选股智能分析系统"
