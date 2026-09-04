@@ -585,36 +585,13 @@ def build_reco_json(ws):
         rr["sector_chg"] = _h.get("chg")
         rr["hot"] = _bn is not None
         rr["cat"] = ("hot_highpe" if (rr["pe"] and rr["pe"] > 50) else "hot_lowval") if _bn else "not_hot"
-        rr["fund_ok"] = (rr["roe"] is not None and rr["roe"] >= 8)
-        rr["val_ok"] = bool(rr["pe"] and rr["pe"] > 0 and rr["pe"] < 50 and rr["pullback"])
-        rr["quad_ok"] = rr["fund_ok"] and rr["val_ok"] and rr["hot"] and rr["pullback"]
         cands.append(rr)
 
-    def triple_ok(r):
-        return bool(r["pe"] and r["pe"] > 0 and r["pe"] < 50 and r["hot"] and r["pullback"])
-
-    def combined(r):
-        return r["score"] + (12 if r["hot"] else 0) + r.get("pb_score", 0)
-
-    quad = sorted([r for r in cands if r["quad_ok"]], key=combined, reverse=True)
-    triple = sorted([r for r in cands if triple_ok(r)], key=combined, reverse=True)
     low_hot = sorted([r for r in cands if r["pe"] and r["pe"] > 0 and r["pe"] < 50 and r["hot"] and not r["pullback"]], key=lambda x: x["score"], reverse=True)
     low_pb = sorted([r for r in cands if r["pe"] and r["pe"] > 0 and r["pe"] < 50 and r["pullback"] and not r["hot"]], key=lambda x: x["score"], reverse=True)
     hot_hi = sorted([r for r in cands if r["hot"] and not (r["pe"] and r["pe"] > 0 and r["pe"] < 50)], key=lambda x: x["score"], reverse=True)
 
     groups = []
-    if quad:
-        groups.append({"group": "✅ 四重符合（基本面良好×低估值×阶段热点×回踩调整）", "board_name": None, "cat": "quad",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "四条件全中·最优选区（优先关注）", "items": quad[:8]})
-    else:
-        groups.append({"group": "✅ 四重符合（基本面良好×低估值×阶段热点×回踩调整）", "board_name": None, "cat": "quad",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "当前市场无四条件全中标的（见下方分层/行业细分）", "items": []})
-    if triple:
-        groups.append({"group": "✅ 三重符合（低估值×阶段热点×回踩调整）", "board_name": None, "cat": "triple",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "三重符合·回踩买点区（优先关注）", "items": triple[:6]})
-    else:
-        groups.append({"group": "✅ 三重符合（低估值×阶段热点×回踩调整）", "board_name": None, "cat": "triple",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "当前市场无完全符合三重条件的标的（见下方分层）", "items": []})
     if low_hot:
         groups.append({"group": "⚠️ 估值偏低×热点（未回踩·需回踩方能入池）", "board_name": None, "cat": "lowhot",
                        "hot": True, "heat_rank": None, "sector_chg": None, "tag": "估值偏低(PE<50)+热点，但未回踩，不满足入池条件，等回踩确认后再介入", "items": low_hot[:4]})
@@ -635,9 +612,9 @@ def build_reco_json(ws):
         rank = (hot.get(s) or {}).get("rank")
         hot_now = rank is not None and rank <= HOT_RANK_CUTOFF
         hot_tag = f"阶段热点(#第{rank}名)" if hot_now else "非当前热点"
-        has_triple = any(triple_ok(x) for x in items)
+        has_pb = any(x.get("pullback") for x in items)
         if hot_now:
-            tag2 = f"{hot_tag}·低估值优选" + ("·回踩调整" if has_triple else "·当前未回踩(暂观望)")
+            tag2 = f"{hot_tag}·低估值优选" + ("·回踩调整" if has_pb else "·当前未回踩(暂观望)")
         else:
             tag2 = "非当前热点行业·长期观察"
         cat2 = "hot_lowval" if hot_now else "not_hot"
@@ -996,7 +973,7 @@ def run_full(ws):
                 hot_sec[c] = b["name"]
         print(f"[info] 热点行业 {b['name']}: 成分 {len(members)} 只，universe 命中 {sum(1 for c in all_codes if c[2:] in members)} 只")
     emit_hot_sectors(f"{ws}/_hot_sectors.json", hot_sec)
-    leads = fetch_em_hotspot()
+    # leads 已在上方 fetch_em_hotspot() 获取（含空结果重试）；此处直接复用，避免重复请求
     emit_hot_rank(f"{ws}/_hot_rank.md", leads)
     # 3) 评分/产出（逻辑与本地一致）
     #    注：dsa_decisions.json（诊股 verdict）由本地 build_report3.py 产出（0 token 规则引擎），
@@ -1033,10 +1010,9 @@ def selftest(ws):
     leads = build_hotspot_leaders(d, name_to_code={"科大讯飞": "002230", "拓斯达": "300607"})
     # 断言关键 schema
     assert "groups" in reco and "hot" in reco, "reco.json schema 缺失"
-    assert any(g["cat"] == "quad" for g in reco["groups"]), "缺少 quad 分组"
+    assert len(reco["groups"]) > 0, "reco.json groups 为空"
     assert leads and leads[0]["code"] == "002230", "hotspot_leaders 解析/解析码失败"
     print(f"[selftest] reco groups={len(reco['groups'])} hotspot={len(leads)} OK")
-    print("[selftest] 样例 reco 四重符合:", [it['code'] for g in reco['groups'] if g['cat']=='quad' for it in g['items']])
     return True
 
 

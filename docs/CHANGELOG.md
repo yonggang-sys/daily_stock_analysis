@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 > For user-friendly release highlights, see the [GitHub Releases](https://github.com/ZhuLinsen/daily_stock_analysis/releases) page.
 
 ## [Unreleased]
+- [改进] ci_emit.py 移除 quad_ok 四条件选股逻辑（fund_ok/val_ok/quad_ok/triple_ok 及对应分组），reco.json 仅保留 low_hot/low_pb/hot_hi 三组及板块细分分组
+- [修复] ci_emit.py 移除 emit 阶段对 fetch_em_hotspot() 的重复调用，leads 直接复用首轮（含空结果重试）结果，减少一次东财 API 往返
+- [改进] GEMINI_REQUEST_DELAY 从硬编码 3.0s 改为可配置（Repository Variables），默认降至 1.5s，减少股票间 LLM 请求间隔
 - [修复] 将 litellm 依赖窗口上界收敛到 `<1.99.0`：1.99.0 起把 `prompt_cache_key` 透传给 OpenAI provider，破坏 provider 缓存测试对不透传行为的既有断言（CI backend-tests 3/3 与 backend-gate 失败）；保留历史最低版本与 `!=1.82.7`/`!=1.82.8` 事故排除，同时同步更新各 LLM 兼容文档中写死的依赖约束表述，避免文档与 requirements.txt 漂移
 
 - [新功能] 新增 `SEARXNG_TIMEOUT_SECONDS` 配置自建 SearXNG 单次搜索超时（默认 10 秒），已接线全部 SearchService 构造入口（含题材搜索子进程重建）与默认 GitHub Actions 工作流

@@ -165,7 +165,7 @@ jobs:
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
           GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
-          GEMINI_REQUEST_DELAY: '3.0'
+          GEMINI_REQUEST_DELAY: ${{ vars.GEMINI_REQUEST_DELAY || '1.5' }}
           
           # AIHubMix（优先于 OPENAI_API_KEY，自动适配 base_url，推荐国内用户）
           AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}
@@ -654,6 +654,8 @@ jobs:
           path: |
             reports/
             logs/
+            screening_result.json
+            screening_reco.json
           retention-days: 30
 
       - name: CI 取数产出（选股/热点/资金流）
@@ -690,6 +692,59 @@ jobs:
           echo "⚠️ CI 取数产出失败，选股/热点/资金流数据可能缺失"
           echo "请检查 ci_emit 日志"
 
+      - name: AlphaSift 选股引擎
+        # 调用 DSA 内置 AlphaSift screening pipeline 进行全市场选股（含因子评分 + LLM 重排）。
+        # 依赖 LLM key 和数据源 token（与 main.py 共用同一套 secrets）。
+        # continue-on-error：选股失败不阻断后续发布（ci_emit 的 reco.json 仍可独立发布）。
+        if: always()
+        id: ci_screen
+        continue-on-error: true
+        env:
+          # LLM 配置（screening pipeline 的 LLM 重排需要）
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
+          LITELLM_FALLBACK_MODELS: ${{ vars.LITELLM_FALLBACK_MODELS || secrets.LITELLM_FALLBACK_MODELS }}
+          LITELLM_CONFIG: ${{ vars.LITELLM_CONFIG || secrets.LITELLM_CONFIG }}
+          LITELLM_CONFIG_YAML: ${{ vars.LITELLM_CONFIG_YAML || secrets.LITELLM_CONFIG_YAML }}
+          LLM_CHANNELS: ${{ vars.LLM_CHANNELS || secrets.LLM_CHANNELS }}
+          LLM_TEMPERATURE: ${{ vars.LLM_TEMPERATURE || secrets.LLM_TEMPERATURE }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}
+          # 数据源
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          TICKFLOW_API_KEY: ${{ secrets.TICKFLOW_API_KEY }}
+          # 选股配置
+          SCREENING_ENABLED: 'true'
+          SCREENING_STRATEGY: ${{ vars.SCREENING_STRATEGY || 'shrink_pullback' }}
+          SCREENING_MARKET: 'cn'
+          SCREENING_MAX_RESULTS: ${{ vars.SCREENING_MAX_RESULTS || '10' }}
+          SCREENING_USE_LLM: 'true'
+          # 网络优化
+          HTTP_TIMEOUT: ${{ vars.HTTP_TIMEOUT || '30' }}
+          HTTP_RETRY_TOTAL: ${{ vars.HTTP_RETRY_TOTAL || '3' }}
+          HTTP_POOL_CONNECTIONS: ${{ vars.HTTP_POOL_CONNECTIONS || '20' }}
+          HTTP_POOL_MAXSIZE: ${{ vars.HTTP_POOL_MAXSIZE || '30' }}
+        run: |
+          set -euo pipefail
+          python ci_screen.py
+          echo "✅ AlphaSift screening 完成（screening_result.json / screening_reco.json）"
+
+      - name: AlphaSift 选股失败告警
+        if: steps.ci_screen.outcome == 'failure'
+        run: |
+          echo "⚠️ AlphaSift 选股引擎运行失败，screening 数据可能缺失"
+          echo "ci_emit reco.json 不受影响，仍会正常发布"
+          echo "请检查 ci_screen 步骤日志"
+
       - name: 发布报告 + 结构化 JSON 到 ci-reports 分支（供本地仪表盘免 token 拉取）
         # 零 LLM 模式：发布门槛不再强依赖 LLM 报告(report_*.md)；
         # 只要 ci_emit 产出的结构化 JSON(reco.json 等) 存在即发布，保证选股结论持续更新。
@@ -701,7 +756,7 @@ jobs:
           LATEST=$(ls -t reports/report_*.md 2>/dev/null | head -1) || true
           # 收集 ci_emit 结构化产物（零 LLM，独立产出）
           EMIT_FILES=""
-          for f in reco.json hotspot_leaders.json holding_fundflow.json; do
+          for f in reco.json hotspot_leaders.json holding_fundflow.json screening_result.json screening_reco.json; do
             if [ -s "$f" ]; then EMIT_FILES="$EMIT_FILES $f"; fi
           done
           if [ -z "$LATEST" ] && [ -z "$EMIT_FILES" ]; then
@@ -734,6 +789,10 @@ jobs:
           git add -f reports/latest.meta.json
           # 方案A 产物（ci_emit 产出；缺失则跳过，不阻断发布）
           for f in reco.json hotspot_leaders.json holding_fundflow.json; do
+            if [ -f "$f" ]; then git add -f "$f"; fi
+          done
+          # AlphaSift 选股产物（ci_screen 产出；缺失则跳过，不阻断发布）
+          for f in screening_result.json screening_reco.json; do
             if [ -f "$f" ]; then git add -f "$f"; fi
           done
           if git diff --cached --quiet; then
