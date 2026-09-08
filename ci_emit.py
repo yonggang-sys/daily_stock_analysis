@@ -602,28 +602,27 @@ def build_reco_json(ws):
     low_pb = sorted([r for r in cands if r["pe"] and r["pe"] > 0 and r["pe"] < 50 and r["pullback"] and not r["hot"]], key=lambda x: x["score"], reverse=True)
     hot_hi = sorted([r for r in cands if r["hot"] and not (r["pe"] and r["pe"] > 0 and r["pe"] < 50)], key=lambda x: x["score"], reverse=True)
 
+    # ===== DSA 原始结果直推（去除四条件 quad_ok 筛选门槛）=====
+    # ci_emit 仅负责把 DSA 主流程产出的原始候选（_candA..D.md / _candU.md）原样推送
+    # 至仪表盘，不再以 quad_ok 四条件（基本面/低估值/阶段热点/回踩）作为入池门槛。
+    # quad_ok / fund_ok / val_ok 仍作为参考标记保留在每条记录上，供仪表盘标注。
+    all_sorted = sorted(cands, key=lambda x: (x.get("score") or 0), reverse=True)
     groups = []
+    # 1) 原始候选全量（核心：未加四条件筛选，直接推送 daily_stock_analysis 原始结果）
+    groups.append({
+        "group": "📊 DSA 原始候选（全量·未加四条件筛选）",
+        "board_name": None, "cat": "raw", "hot": None, "heat_rank": None, "sector_chg": None,
+        "tag": "直接推送 daily_stock_analysis 原始选股结果，未叠加 ci_emit 四条件门槛；quad_ok 仅作参考标注",
+        "items": all_sorted,
+    })
+    # 2) 四条件全中（仅供参考，非入池门槛）
     if quad:
-        groups.append({"group": "✅ 四重符合（基本面良好×低估值×阶段热点×回踩调整）", "board_name": None, "cat": "quad",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "四条件全中·最优选区（优先关注）", "items": quad[:8]})
-    else:
-        groups.append({"group": "✅ 四重符合（基本面良好×低估值×阶段热点×回踩调整）", "board_name": None, "cat": "quad",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "当前市场无四条件全中标的（见下方分层/行业细分）", "items": []})
-    if triple:
-        groups.append({"group": "✅ 三重符合（低估值×阶段热点×回踩调整）", "board_name": None, "cat": "triple",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "三重符合·回踩买点区（优先关注）", "items": triple[:6]})
-    else:
-        groups.append({"group": "✅ 三重符合（低估值×阶段热点×回踩调整）", "board_name": None, "cat": "triple",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "当前市场无完全符合三重条件的标的（见下方分层）", "items": []})
-    if low_hot:
-        groups.append({"group": "⚠️ 估值偏低×热点（未回踩·需回踩方能入池）", "board_name": None, "cat": "lowhot",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "估值偏低(PE<50)+热点，但未回踩，不满足入池条件，等回踩确认后再介入", "items": low_hot[:4]})
-    if low_pb:
-        groups.append({"group": "低估值×回踩（非当前热点）", "board_name": None, "cat": "lowpb",
-                       "hot": False, "heat_rank": None, "sector_chg": None, "tag": "低估值+回踩，但不在热点行业，弹性与资金关注较弱", "items": low_pb[:4]})
-    if hot_hi:
-        groups.append({"group": "仅热点（估值偏高·仅参考）", "board_name": None, "cat": "hothi",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "热点但PE≥50，非低估值优选(低估值要求PE<50且回踩)，仅作参考", "items": hot_hi[:4]})
+        groups.append({
+            "group": "✅ 四条件全中（仅供参考·非入池门槛）",
+            "board_name": None, "cat": "quad", "hot": True, "heat_rank": None, "sector_chg": None,
+            "tag": "同时满足 基本面良好×低估值×阶段热点×回踩调整（原四重符合口径），现仅作标注，不再作为筛选门槛",
+            "items": quad,
+        })
 
     _seen_sec = {}
     for r in cands:
