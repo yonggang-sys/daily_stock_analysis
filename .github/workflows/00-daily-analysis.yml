@@ -1,12 +1,17 @@
 name: 每日股票分析
 
 on:
-  # 定时触发已停用（2026-09-08）：改为仅手动触发，避免每日自动消耗 LLM 配额与产出冗余数据。
-  # 原三时点保留备查，需要恢复时去掉下方注释即可：
-  # schedule:
-  #   - cron: '30 0 * * 1-5'     # 北京 08:30 - 盘前
-  #   - cron: '45 3 * * 1-5'     # 北京 11:45 - 午盘复盘
-  #   - cron: '30 7 * * 1-5'     # 北京 15:30 - 收盘
+  # 定时触发（2026-09-08 起改为外部驱动）：由本机自动化在北京时间 08:30 / 11:45 / 15:30 发起，
+  # GitHub 仅作执行器——GitHub 自带 cron 只是尽力而为（实测曾延迟 5h21m），无法保证准点。
+  #
+  # 通道一（首选，需 PAT）：POST /repos/<owner>/<repo>/dispatches
+  #                         {"event_type":"daily-analysis","client_payload":{"slot":"pre|noon|close","mode":"full"}}
+  # 通道二（零凭据兜底）：  git push origin HEAD:ci-trigger
+  #                         时段写在提交信息里，如 "ci: trigger [slot=pre] 2026-09-08"
+  repository_dispatch:
+    types: [daily-analysis]
+  push:
+    branches: [ci-trigger]
   # 手动触发（保留）：仍可产出 ci-reports，仪表盘数据源可控不断供
   workflow_dispatch:
     inputs:
@@ -24,11 +29,23 @@ on:
         required: false
         default: false
         type: boolean
+      slot:
+        description: '触发时段（仅用于并发分组与产物标注）'
+        required: false
+        default: 'adhoc'
+        type: choice
+        options:
+          - pre      # 北京 08:30 - 盘前
+          - noon     # 北京 11:45 - 午盘复盘
+          - close    # 北京 15:30 - 收盘
+          - adhoc
 
-# 并发控制：同一时间只运行一个分析任务；区分事件来源，避免 schedule 与 dispatch 互相阻塞
+# 并发控制：按「事件 + 时段/分支」分组，外部三时点互不取消。
+# cancel-in-progress 由 true 改为 false：本作业历史最长跑到 1h05m，
+# 被新触发静默取消会表现为「以为触发了、实际没有产出」，是外部触发场景的典型陷阱。
 concurrency:
-  group: stock-analysis-${{ github.event_name }}
-  cancel-in-progress: true
+  group: stock-analysis-${{ github.event_name }}-${{ github.event.client_payload.slot || github.event.inputs.slot || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   analyze:
@@ -36,8 +53,8 @@ jobs:
     # 兼容误将 STOCK_LIST 配到同名 Environment variables 的场景；
     # 推荐位置仍是 Settings -> Secrets and variables -> Actions -> Repository variables。
     environment: STOCK_LIST
-    # 添加超时限制，防止任务卡死
-    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '60') }}
+    # 添加超时限制，防止任务卡死；默认由 60 提到 90 —— 历史 #136/#137/#139 均跑到 1h05m
+    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '90') }}
 
     # 发布步需要向 ci-reports 分支 push，故授予 contents: write
     # （仅覆盖本作业所需权限；同作业内 upload-artifact 同运行上传仅需 contents: read，write 已含 read）
@@ -45,11 +62,13 @@ jobs:
       contents: write
 
     steps:
-      - name: 随机延迟（避免固定时间访问）
-        run: sleep $((RANDOM % 60))  # 随机延迟0-60秒启动
-      
       - name: 检出代码
         uses: actions/checkout@v5
+
+      - name: 随机延迟（避免固定时间访问）
+        # 由「checkout 之前、0-60s」改为「checkout 之后、0-15s」：
+        # 外部触发要求准点，原写法在检出前空转、白白占用 runner 时长
+        run: sleep $((RANDOM % 15))
       
       - name: 设置 Python 环境
         uses: actions/setup-python@v6
@@ -67,8 +86,23 @@ jobs:
         run: |
           mkdir -p data logs reports .cache
 
-      - name: 设置日期环境变量
-        run: echo "TODAY=$(date +%Y%m%d)" >> $GITHUB_ENV
+      - name: 设置日期与触发时段环境变量
+        env:
+          PAYLOAD_SLOT: ${{ github.event.client_payload.slot }}
+          INPUT_SLOT: ${{ github.event.inputs.slot }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          echo "TODAY=$(date +%Y%m%d)" >> $GITHUB_ENV
+          # 时段优先级：repository_dispatch payload > workflow_dispatch input > push 提交信息 [slot=xxx] > adhoc
+          # pre=北京08:30盘前 / noon=北京11:45午盘 / close=北京15:30收盘
+          SLOT="$PAYLOAD_SLOT"
+          [ -z "$SLOT" ] && SLOT="$INPUT_SLOT"
+          if [ -z "$SLOT" ] && [ -n "$COMMIT_MSG" ]; then
+            SLOT="$(printf '%s' "$COMMIT_MSG" | sed -n 's/.*\[slot=\([a-zA-Z0-9_-]*\)\].*/\1/p')"
+          fi
+          [ -z "$SLOT" ] && SLOT="adhoc"
+          echo "RUN_SLOT=$SLOT" >> $GITHUB_ENV
+          echo "触发时段: $SLOT（事件: ${{ github.event_name }}）"
 
       - name: 恢复数据缓存
         uses: actions/cache@v5
@@ -509,7 +543,7 @@ jobs:
           fi
 
           # 判断运行模式
-          MODE="${{ github.event.inputs.mode || 'full' }}"
+          MODE="${{ github.event.client_payload.mode || github.event.inputs.mode || 'full' }}"
           
           echo "=========================================="
           echo "🚀 A股自选股智能分析系统"
@@ -581,7 +615,7 @@ jobs:
           
           # 构建命令行参数
           FORCE_RUN_ARG=""
-          if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
+          if [ "${{ github.event.client_payload.force_run || github.event.inputs.force_run }}" = "true" ]; then
             FORCE_RUN_ARG="--force-run"
             echo "⚡ 已启用强制运行模式（跳过交易日检查）"
           fi
