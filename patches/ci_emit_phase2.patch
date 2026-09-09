@@ -1,0 +1,143 @@
+--- a/ci_emit.py
++++ b/ci_emit.py
+@@ -149,37 +149,53 @@
+ # 东财 push2 有多组等价主机（push2 / 1.push2 / 2.push2 / push2delay）。
+ # GitHub Runner 单 IP 高频访问会被限流（RemoteDisconnected/502/静默空响应），
+ # clist 类请求依次换主机重试可绕开（run 116 实证：clist 静默空 → 热点 0 条）。
+-EM_PUSH2_HOSTS = ["push2.eastmoney.com", "1.push2.eastmoney.com",
+-                  "2.push2.eastmoney.com", "push2delay.eastmoney.com"]
++# push2delay 已知最稳定（CDN 回源），移到首位避免不必要的 push2 超时等待。
++EM_PUSH2_HOSTS = ["push2delay.eastmoney.com", "push2.eastmoney.com",
++                  "1.push2.eastmoney.com", "2.push2.eastmoney.com"]
+ # push2his 同样有多组等价主机，资金流接口限流时换主机重试。
+-EM_PUSH2HIS_HOSTS = ["push2his.eastmoney.com", "1.push2his.eastmoney.com",
+-                     "2.push2his.eastmoney.com", "push2delay.eastmoney.com"]
++EM_PUSH2HIS_HOSTS = ["push2delay.eastmoney.com", "push2his.eastmoney.com",
++                     "1.push2his.eastmoney.com", "2.push2his.eastmoney.com"]
+ 
+ 
+ def em_clist_items(url):
+-    """东财 clist 多主机重试。url 为完整 URL（首主机），其余主机仅替换域名再试。
+-    返回 diff dict；全部失败/空数据返回 {}（每步打 warn，便于日志定位）。"""
++    """东财 clist 多主机并行竞速。url 为完整 URL（首主机），其余主机仅替换域名。
++    同时向所有主机发起请求，取最先返回非空 diff 的结果。
++    返回 diff dict；全部失败/空数据返回 {}（每步打 warn，便于日志定位）。
++    优化（Phase 2）：原串行回退每主机超时 20s × 4 = 最差 80s/请求 → 并行竞速后 ≤ 8s/请求。"""
+     from urllib.parse import urlsplit, urlunsplit
+     sp = urlsplit(url)
+-    for i, host in enumerate(EM_PUSH2_HOSTS):
++    # 构造所有主机的 URL 列表
++    host_urls = [url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
++                 for i, host in enumerate(EM_PUSH2_HOSTS)]
++
++    def _try_host(host_idx):
++        host = EM_PUSH2_HOSTS[host_idx]
++        u = host_urls[host_idx]
+         try:
+-            u = url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
+-            txt, ok = http_get(u, timeout=20)
++            txt, ok = http_get(u, timeout=8)
+             if not ok:
+-                print(f"[warn] clist {host}: http_get 失败（超时/连接重置）")
+-                continue
++                return host, None, "http_get 失败（超时/连接重置）"
+             j = json.loads(txt).get("data") or {}
+             diff = j.get("diff") or {}
+             if not isinstance(diff, dict):
+                 diff = {}
+             if not diff:
+-                print(f"[warn] clist {host}: data.diff 为空（疑似限流空响应）")
+-                continue
+-            if i > 0:
+-                print(f"[info] clist 主机 fallback 生效: {host}（{len(diff)} 条）")
+-            return diff
++                return host, None, "data.diff 为空（疑似限流空响应）"
++            return host, diff, None
+         except Exception as e:
+-            print(f"[warn] clist {host}: {type(e).__name__}: {e}")
++            return host, None, f"{type(e).__name__}: {e}"
++
++    # 并行竞速：同时请求所有主机，取最先成功的
++    with ThreadPoolExecutor(max_workers=len(EM_PUSH2_HOSTS)) as pool:
++        futures = {pool.submit(_try_host, i): i for i in range(len(EM_PUSH2_HOSTS))}
++        for future in as_completed(futures, timeout=12):
++            host, diff, err = future.result()
++            if diff is not None:
++                if futures[future] > 0:
++                    print(f"[info] clist 并行竞速命中: {host}（{len(diff)} 条）")
++                return diff
++            else:
++                print(f"[warn] clist {host}: {err}")
+     return {}
+
+
+@@ -340,40 +356,49 @@
+
+
+ def fetch_em_fundflow(code):
+-    """东财个股主力资金流（日级）-> {1d,3d,5d,10d,20d} 主力净流入(元)。push2his 多主机重试。"""
++    """东财个股主力资金流（日级）-> {1d,3d,5d,10d,20d} 主力净流入(元)。push2his 多主机并行竞速。
++    优化（Phase 2）：原串行回退每主机超时 20s × 4 = 最差 80s/股 → 并行竞速后 ≤ 8s/股。"""
+     from urllib.parse import urlsplit, urlunsplit
+     sec = em_secid(code)
+     base_url = EM_FLOW.format(secid=sec)
+     sp = urlsplit(base_url)
+-    txt, ok = "", False
+-    for i, host in enumerate(EM_PUSH2HIS_HOSTS):
+-        u = base_url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
++    # 构造所有主机的 URL 列表
++    host_urls = [base_url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
++                 for i, host in enumerate(EM_PUSH2HIS_HOSTS)]
++
++    def _try_host(host_idx):
++        host = EM_PUSH2HIS_HOSTS[host_idx]
++        u = host_urls[host_idx]
+         # curl 优先（push2his 对 urllib 有时静默断连）
+-        txt, ok = http_get(u, timeout=20, use_curl=True)
++        txt, ok = http_get(u, timeout=8, use_curl=True)
+         if not ok:
+             # 回退 urllib
+-            txt, ok = http_get(u, timeout=20, use_curl=False)
++            txt, ok = http_get(u, timeout=8, use_curl=False)
+         if not ok:
+-            print(f"[warn] fundflow {code} host {host}: http_get 失败（超时/连接重置）")
+-            continue
+-        # 校验返回数据非空（限流时空响应）
++            return host, None, None, "http_get 失败（超时/连接重置）"
+         try:
+             j_test = json.loads(txt)
+             klines = (j_test.get("data") or {}).get("klines") or []
+             if klines:
+-                if i > 0:
+-                    print(f"[info] fundflow {code} 主机 fallback 生效: {host}（{len(klines)} 条）")
+-                break
++                return host, txt, klines, None
+             else:
+-                print(f"[warn] fundflow {code} host {host}: klines 为空（疑似限流）")
+-                txt, ok = "", False
+-                continue
++                return host, None, None, "klines 为空（疑似限流）"
+         except Exception:
+-            print(f"[warn] fundflow {code} host {host}: JSON 解析失败")
+-            txt, ok = "", False
+-            continue
+-    if not ok:
+-        return None
++            return host, None, None, "JSON 解析失败"
++
++    # 并行竞速：同时请求所有主机，取最先返回有效数据的
++    with ThreadPoolExecutor(max_workers=len(EM_PUSH2HIS_HOSTS)) as pool:
++        futures = {pool.submit(_try_host, i): i for i in range(len(EM_PUSH2HIS_HOSTS))}
++        for future in as_completed(futures, timeout=12):
++            host, txt, klines, err = future.result()
++            if klines is not None:
++                if futures[future] > 0:
++                    print(f"[info] fundflow {code} 并行竞速命中: {host}（{len(klines)} 条）")
++                break
++            else:
++                print(f"[warn] fundflow {code} host {host}: {err}")
++        else:
++            return None
+     try:
+         klines = (json.loads(txt).get("data") or {}).get("klines") or []
+         # 每行: 日期,主力净流入(f52),主力净占比,...

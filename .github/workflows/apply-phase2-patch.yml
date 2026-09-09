@@ -1,0 +1,37 @@
+name: Apply Phase 2 Patch
+
+on:
+  workflow_dispatch:
+
+jobs:
+  apply-patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: feature/efficiency-optimization
+          fetch-depth: 0
+
+      - name: Apply Phase 2 patch
+        id: apply
+        run: |
+          if git apply --check patches/ci_emit_phase2.patch 2>/dev/null; then
+            git apply patches/ci_emit_phase2.patch
+            echo "applied=true" >> $GITHUB_OUTPUT
+            echo "Patch applied successfully"
+          else
+            echo "applied=false" >> $GITHUB_OUTPUT
+            echo "Patch already applied or cannot apply - skipping"
+          fi
+
+      - name: Commit and push
+        if: steps.apply.outputs.applied == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "perf(ci_emit): Phase 2 - push2delay首位 + ThreadPoolExecutor并行竞速 + timeout 8s"
+          git push
