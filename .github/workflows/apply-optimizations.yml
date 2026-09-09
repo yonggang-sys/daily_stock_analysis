@@ -1,6 +1,11 @@
 name: Apply Efficiency Optimizations
 
 on:
+  push:
+    branches:
+      - feature/efficiency-optimization
+    paths:
+      - '.github/workflows/apply-optimizations.yml'
   workflow_dispatch:
     inputs:
       target_branch:
