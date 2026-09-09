@@ -1,9 +1,13 @@
 name: 每日股票分析
 
 on:
-  # 定时触发（2026-09-08 起改为外部驱动）：由本机自动化在北京时间 08:30 / 11:45 / 15:30 发起，
-  # GitHub 仅作执行器——GitHub 自带 cron 只是尽力而为（实测曾延迟 5h21m），无法保证准点。
-  #
+  # ── 双保险触发（2026-09-09 起）────────────────────────────────────────────
+  # 外部可靠定时器(cron-job.org 等 SaaS，POST /dispatches 触发 repository_dispatch)
+  # 与 本机 WorkBuddy 自动化(ci_trigger.py → repository_dispatch / push ci-trigger)
+  # 同时触发同一样时段；任一方成功即产出报告，规避
+  # 「本机 WorkBuddy 会话/桌面端未活跃导致自动化被跳过」的单点失效。
+  # 不使用 GitHub 自带 schedule（尽力而为、会延迟/被停用），外部定时器统一走 cron-job.org。
+  # 去重：run 起步查 ci-reports 是否已有本时段新鲜报告，有则跳过主分析（见「去重检查」步）。
   # 通道一（首选，需 PAT）：POST /repos/<owner>/<repo>/dispatches
   #                         {"event_type":"daily-analysis","client_payload":{"slot":"pre|noon|close","mode":"full"}}
   # 通道二（零凭据兜底）：  git push origin HEAD:ci-trigger
@@ -69,6 +73,32 @@ jobs:
         # 由「checkout 之前、0-60s」改为「checkout 之后、0-15s」：
         # 外部触发要求准点，原写法在检出前空转、白白占用 runner 时长
         run: sleep 5
+      
+      - name: 去重检查（双触发保护）
+        # 外部定时器(cron-job.org 等 SaaS，POST /dispatches 触发 repository_dispatch)
+        # 与本机 WorkBuddy 自动化同时触发同一样时段时，避免两边都跑一遍主分析(耗 LLM 配额)。
+        # 逻辑：若 ci-reports 已有「今天且 90 分钟内」的新鲜报告，说明另一路触发已产出，本 run 跳过主分析。
+        # 网络/解析失败 → 不跳过（fail-open：宁多跑、不错过报告）。
+        run: |
+          set -uo pipefail
+          NOW=$(TZ='Asia/Shanghai' date +%s)
+          TODAY=$(TZ='Asia/Shanghai' date +%Y-%m-%d)
+          META_URL="https://raw.githubusercontent.com/${{ github.repository }}/ci-reports/reports/latest.meta.json"
+          if ! curl -fsSL --max-time 25 "$META_URL" -o /tmp/lm.json 2>/dev/null; then
+            echo "ℹ️ 无法获取 ci-reports meta（网络/首次），完整运行"; exit 0
+          fi
+          GEN=$(python3 -c "import json,sys;d=json.load(open('/tmp/lm.json'));print(d.get('generated_at',''))" 2>/dev/null || true)
+          if [ -z "$GEN" ]; then echo "ℹ️ meta 无 generated_at，完整运行"; exit 0; fi
+          GEN_DAY=${GEN:0:10}
+          GEN_TS=$(TZ='Asia/Shanghai' date -d "${GEN}" +%s 2>/dev/null || echo 0)
+          DIFF=$(( (NOW - GEN_TS) / 60 ))
+          echo "🕒 现在(北京)=$TODAY / meta.generated_at=$GEN / ${DIFF}分钟前"
+          if [ "$GEN_DAY" = "$TODAY" ] && [ "$DIFF" -ge 0 ] && [ "$DIFF" -le 90 ]; then
+            echo "⏭️ 本时段已有 ${DIFF} 分钟前新鲜报告，跳过主分析与取数"
+            touch SKIP_ANALYSIS
+          else
+            echo "✅ 无新鲜报告，完整运行"
+          fi
       
       - name: 设置 Python 环境
         uses: actions/setup-python@v6
@@ -627,6 +657,12 @@ jobs:
             exit 0
           fi
 
+          # 双触发去重：本机自动化已产出本时段新鲜报告则跳过（避免重复烧 LLM 配额）
+          if [ -f SKIP_ANALYSIS ]; then
+            echo "⏭️ 去重：本时段已有另一路触发产出的新鲜报告，跳过主分析"
+            exit 0
+          fi
+
           # 执行分析（3次尝试，间隔递增）
           for attempt in 1 2 3; do
             echo ""
@@ -686,6 +722,11 @@ jobs:
           MAX_CONCURRENT_REQUESTS: ${{ vars.MAX_CONCURRENT_REQUESTS || '10' }}
         run: |
           set -euo pipefail
+          # 双触发去重：本机自动化已产出本时段新鲜报告则跳过取数
+          if [ -f SKIP_ANALYSIS ]; then
+            echo "⏭️ 去重：本时段已有另一路触发产出的新鲜报告，跳过取数"
+            exit 0
+          fi
           for attempt in 1 2 3; do
             echo "ci_emit 尝试 $attempt/3..."
             python ci_emit.py && break
