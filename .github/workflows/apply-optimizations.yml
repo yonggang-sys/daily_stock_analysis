@@ -6,7 +6,6 @@ on:
       - feature/efficiency-optimization
     paths:
       - 'scripts/apply_optimizations.py'
-      - '.github/workflows/apply-optimizations.yml'
   workflow_dispatch:
     inputs:
       target_branch:
@@ -36,25 +35,10 @@ jobs:
             echo "No changes - optimizations already applied"
           else
             git diff --stat
-            git config user.name "yonggang-sys"
-            git config user.email "yonggang.zhao@gmail.com"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
             git add -A
-            git commit -m "Phase 2-4: efficiency optimizations
-
-      Phase 2 (ci_emit.py):
-      - EM_PUSH2_HOSTS: push2delay first
-      - em_clist_items/fetch_em_fundflow: serial -> parallel racing
-      - Timeout: 20s -> 8s, 12s cap
-
-      Phase 3 (analyzer.py):
-      - is_rate_limit: detect 503/Service Unavailable/overloaded/high demand
-      - stream->non-stream: skip retry on quota errors
-
-      Phase 4 (00-daily-analysis.yml):
-      - sleep 15->5, remove pip upgrade
-      - GEMINI_REQUEST_DELAY: vars(default 0.5)
-      - MAX_WORKERS: default 3
-      - GEMINI_API_KEYS multi-key detection"
+            git commit -m "Phase 2-4: efficiency optimizations"
             git push
           fi
 
@@ -79,8 +63,7 @@ jobs:
                 title: 'Phase 2-4: Efficiency Optimizations',
                 head: 'feature/efficiency-optimization',
                 base: 'main',
-                body: `## Phase 2-4 Efficiency Optimizations\n\n      ### Phase 2: ci_emit.py - Parallel Host Racing\n      - **Problem**: Serial host fallback 20s x 4 = 80s worst case per request\n      - **Fix**: ThreadPoolExecutor parallel racing, 8s timeout, 12s cap\n      - **Impact**: 80s -> 12s (6.7x improvement)\n\n      ### Phase 3: analyzer.py - 503/Quota Detection\n      - **Problem**: Gemini 503 not detected, wasted non-stream retries on exhausted key\n      - **Fix**: is_rate_limit expanded, quota check before non-stream retry\n\n      ### Phase 4: Workflow YAML\n      - sleep 15s -> 5s, remove pip upgrade\n      - GEMINI_REQUEST_DELAY: vars (default 0.5s)\n      - MAX_WORKERS: default 3\n      - GEMINI_API_KEYS multi-key support\n\n      ### Phase 1: Manual Config Required\n      | Setting | Type | Value |\n      |---------|------|-------|\n      | MAX_WORKERS | Variables | 3 |\n      | GEMINI_REQUEST_DELAY | Variables | 0.5 |\n      | DEEPSEEK_API_KEY | Secrets | (your key) |\n      | GEMINI_API_KEYS | Secrets | key1,key2,key3 |`
+                body: '## Phase 2-4 Efficiency Optimizations\n\n### Phase 2: ci_emit.py - Parallel Host Racing\n- Serial host fallback 20s x 4 = 80s worst case -> ThreadPoolExecutor parallel racing, 8s timeout, 12s cap\n\n### Phase 3: analyzer.py - 503/Quota Detection\n- is_rate_limit expanded for 503/Service Unavailable/overloaded/high demand\n- Quota check before non-stream retry\n\n### Phase 4: Workflow YAML\n- sleep 15s -> 5s, remove pip upgrade\n- GEMINI_REQUEST_DELAY: vars (default 0.5s)\n- MAX_WORKERS: default 3\n- GEMINI_API_KEYS multi-key support\n\n### Phase 1: Manual Config Required\n| Setting | Type | Value |\n|---------|------|-------|\n| MAX_WORKERS | Variables | 3 |\n| GEMINI_REQUEST_DELAY | Variables | 0.5 |\n| DEEPSEEK_API_KEY | Secrets | (your key) |\n| GEMINI_API_KEYS | Secrets | key1,key2,key3 |'
               });
               console.log(`PR created: ${pr.html_url}`);
             }
-# trigger: v2
