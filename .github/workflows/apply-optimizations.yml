@@ -5,6 +5,7 @@ on:
     branches:
       - feature/efficiency-optimization
     paths:
+      - 'scripts/apply_optimizations.py'
       - '.github/workflows/apply-optimizations.yml'
   workflow_dispatch:
     inputs:
@@ -27,162 +28,7 @@ jobs:
           fetch-depth: 0
 
       - name: Apply Phase 2-4 optimizations
-        run: |
-          set -e
-          python3 << 'PYEOF'
-          import re, os, sys
-          ROOT = os.getcwd()
-          applied = 0; skipped = 0; errors = []
-
-          def done(name, status, detail=""):
-              global applied, skipped, errors
-              if status == "applied": applied += 1; print(f"  [OK] {name}")
-              elif status == "skip": skipped += 1; print(f"  [SKIP] {name}: {detail}")
-              elif status == "err": errors.append(f"{name}: {detail}"); print(f"  [ERR] {name}: {detail}")
-
-          def replace_str(fp, name, old, new):
-              try:
-                  c = open(fp, encoding="utf-8").read()
-              except FileNotFoundError:
-                  done(name, "err", f"not found: {fp}"); return
-              if new in c:
-                  done(name, "skip", "already applied"); return
-              if old not in c:
-                  done(name, "err", "source text not found"); return
-              open(fp, "w", encoding="utf-8").write(c.replace(old, new, 1))
-              done(name, "applied")
-
-          def replace_re(fp, name, pat, rep):
-              try:
-                  c = open(fp, encoding="utf-8").read()
-              except FileNotFoundError:
-                  done(name, "err", f"not found: {fp}"); return
-              if isinstance(rep, str) and rep in c:
-                  done(name, "skip", "already applied"); return
-              nc, n = re.subn(pat, rep, c, count=1, flags=re.DOTALL)
-              if n == 0:
-                  done(name, "err", "pattern not matched"); return
-              open(fp, "w", encoding="utf-8").write(nc)
-              done(name, "applied")
-
-          # ===== Phase 2: ci_emit.py =====
-          print("\n== Phase 2: ci_emit.py ==")
-          CE = os.path.join(ROOT, "ci_emit.py")
-          replace_str(CE, "push2 reorder", 'EM_PUSH2_HOSTS = ["push2.eastmoney.com", "push2delay.eastmoney.com",', 'EM_PUSH2_HOSTS = ["push2delay.eastmoney.com", "push2.eastmoney.com",')
-          replace_str(CE, "push2his reorder", 'EM_PUSH2HIS_HOSTS = ["push2his.eastmoney.com", "push2delay.eastmoney.com",', 'EM_PUSH2HIS_HOSTS = ["push2delay.eastmoney.com", "push2his.eastmoney.com",')
-          replace_re(CE, "em_clist parallel", r'def em_clist_items\(url\):.*?(?=\ndef \w)', '''def em_clist_items(url):
-    """东财 clist multi-host parallel race. Returns diff dict; {} on all-fail."""
-    from urllib.parse import urlsplit, urlunsplit
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    sp = urlsplit(url)
-    host_urls = [url if i == 0 else urlunsplit(("https", h, sp.path, sp.query, "")) for i, h in enumerate(EM_PUSH2_HOSTS)]
-    def _try(idx):
-        h = EM_PUSH2_HOSTS[idx]; u = host_urls[idx]
-        try:
-            txt, ok = http_get(u, timeout=8)
-            if not ok: return h, None, "http_get fail"
-            j = json.loads(txt).get("data") or {}
-            diff = j.get("diff") or {}
-            if not isinstance(diff, dict): diff = {}
-            if not diff: return h, None, "diff empty"
-            return h, diff, None
-        except Exception as e: return h, None, f"{type(e).__name__}: {e}"
-    with ThreadPoolExecutor(max_workers=len(EM_PUSH2_HOSTS)) as pool:
-        futs = {pool.submit(_try, i): i for i in range(len(EM_PUSH2_HOSTS))}
-        for f in as_completed(futs, timeout=12):
-            h, diff, err = f.result()
-            if diff is not None:
-                if futs[f] > 0: print(f"[info] clist hit: {h} ({len(diff)})")
-                return diff
-            else: print(f"[warn] clist {h}: {err}")
-    return {}''')
-          replace_re(CE, "fundflow parallel", r'def fetch_em_fundflow\(code\):.*?(?=\ndef \w)', '''def fetch_em_fundflow(code):
-    """东财 fundflow multi-host parallel race. Returns {1d,3d,5d,10d,20d} or None."""
-    from urllib.parse import urlsplit, urlunsplit
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    sec = em_secid(code)
-    base_url = EM_FLOW.format(secid=sec)
-    sp = urlsplit(base_url)
-    host_urls = [base_url if i == 0 else urlunsplit(("https", h, sp.path, sp.query, "")) for i, h in enumerate(EM_PUSH2HIS_HOSTS)]
-    def _try(idx):
-        h = EM_PUSH2HIS_HOSTS[idx]; u = host_urls[idx]
-        txt, ok = http_get(u, timeout=8, use_curl=True)
-        if not ok: txt, ok = http_get(u, timeout=8, use_curl=False)
-        if not ok: return h, None, None, "http_get fail"
-        try:
-            kl = (json.loads(txt).get("data") or {}).get("klines") or []
-            if kl: return h, txt, kl, None
-            return h, None, None, "klines empty"
-        except Exception: return h, None, None, "json fail"
-    with ThreadPoolExecutor(max_workers=len(EM_PUSH2HIS_HOSTS)) as pool:
-        futs = {pool.submit(_try, i): i for i in range(len(EM_PUSH2HIS_HOSTS))}
-        for f in as_completed(futs, timeout=12):
-            h, txt, kl, err = f.result()
-            if kl is not None:
-                if futs[f] > 0: print(f"[info] fundflow {code} hit: {h} ({len(kl)})")
-                break
-            else: print(f"[warn] fundflow {code} {h}: {err}")
-        else: return None
-    try:
-        klines = (json.loads(txt).get("data") or {}).get("klines") or []
-        mains = []
-        for k in klines:
-            parts = k.split(",")
-            if len(parts) > 1:
-                v = num(parts[1])
-                if v is not None: mains.append(v)
-        if not mains: return None
-        def tail(n):''')
-
-          # ===== Phase 3: analyzer.py =====
-          print("\n== Phase 3: analyzer.py ==")
-          AN = os.path.join(ROOT, "src", "analyzer.py")
-          if not os.path.exists(AN): AN = os.path.join(ROOT, "analyzer.py")
-          replace_str(AN, "is_rate_limit 503",
-              '                    is_rate_limit = ("429" in err_text or "rate_limit" in err_text.lower()\n                                     or "Resource Exhausted" in err_text\n                                     or "quota" in err_text.lower())',
-              '                    is_rate_limit = ("429" in err_text or "rate_limit" in err_text.lower()\n                                     or "Resource Exhausted" in err_text\n                                     or "quota" in err_text.lower()\n                                     or "503" in err_text\n                                     or "Service Unavailable" in err_text\n                                     or "overloaded" in err_text.lower()\n                                     or "high demand" in err_text.lower())')
-          replace_str(AN, "stream quota check",
-              '                    except _LiteLLMStreamError as exc:\n                        safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)\n                        if exc.partial_received:',
-              '                    except _LiteLLMStreamError as exc:\n                        safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)\n                        _err_lower = str(exc).lower()\n                        _is_quota_error = ("429" in str(exc) or "rate_limit" in _err_lower\n                                           or "Resource Exhausted" in str(exc)\n                                           or "quota" in _err_lower\n                                           or "503" in str(exc)\n                                           or "Service Unavailable" in str(exc)\n                                           or "overloaded" in _err_lower\n                                           or "high demand" in _err_lower)\n                        if _is_quota_error:\n                            logger.warning("[LiteLLM] %s stream quota error, skip non-stream retry: %s", model, safe_error)\n                            raise\n                        if exc.partial_received:')
-          replace_str(AN, "exception quota check",
-              '                    except Exception as exc:\n                        safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)\n                        logger.warning(\n                            "[LiteLLM] %s stream request failed before first chunk, falling back to non-stream: %s",',
-              '                    except Exception as exc:\n                        safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)\n                        _err_lower = str(exc).lower()\n                        _is_quota_error = ("429" in str(exc) or "rate_limit" in _err_lower\n                                           or "Resource Exhausted" in str(exc)\n                                           or "quota" in _err_lower\n                                           or "503" in str(exc)\n                                           or "Service Unavailable" in str(exc)\n                                           or "overloaded" in _err_lower\n                                           or "high demand" in _err_lower)\n                        if _is_quota_error:\n                            logger.warning("[LiteLLM] %s stream quota error, skip retry: %s", model, safe_error)\n                            raise\n                        logger.warning(\n                            "[LiteLLM] %s stream request failed before first chunk, falling back to non-stream: %s",')
-
-          # ===== Phase 4: workflow YAML =====
-          print("\n== Phase 4: 00-daily-analysis.yml ==")
-          YML = os.path.join(ROOT, ".github", "workflows", "00-daily-analysis.yml")
-          replace_str(YML, "sleep 15->5", "sleep $((RANDOM % 15))", "sleep $((RANDOM % 5))")
-          # Try pip upgrade removal patterns
-          try:
-              yc = open(YML, encoding="utf-8").read()
-              if "pip install --upgrade pip && pip install -r requirements.txt" in yc:
-                  replace_str(YML, "remove pip upgrade", "pip install --upgrade pip && pip install -r requirements.txt", "pip install -r requirements.txt")
-              elif "pip install --upgrade pip" in yc:
-                  lines = yc.split("\n")
-                  nl = [l for l in lines if "pip install --upgrade pip" not in l.strip()]
-                  if len(nl) != len(lines):
-                      open(YML, "w", encoding="utf-8").write("\n".join(nl))
-                      done("remove pip upgrade", "applied")
-                  else: done("remove pip upgrade", "err", "could not remove")
-              else: done("remove pip upgrade", "skip", "not found")
-          except FileNotFoundError: done("remove pip upgrade", "err", "YAML not found")
-          replace_str(YML, "REQUEST_DELAY vars", "GEMINI_REQUEST_DELAY: '3.0'", "GEMINI_REQUEST_DELAY: ${{ vars.GEMINI_REQUEST_DELAY || '0.5' }}")
-          replace_str(YML, "REQUEST_DELAY vars alt", "GEMINI_REQUEST_DELAY: '3'", "GEMINI_REQUEST_DELAY: ${{ vars.GEMINI_REQUEST_DELAY || '0.5' }}")
-          replace_str(YML, "MAX_WORKERS 3", "MAX_WORKERS: ${{ vars.MAX_WORKERS || '1' }}", "MAX_WORKERS: ${{ vars.MAX_WORKERS || '3' }}")
-          replace_str(YML, "Gemini multi-key", "            'Gemini': os.getenv('GEMINI_API_KEY'),", "            'Gemini': os.getenv('GEMINI_API_KEY'),\n            'Gemini(multi-key)': os.getenv('GEMINI_API_KEYS'),")
-          replace_str(YML, "GEMINI_API_KEYS env", "          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}", "          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}\n          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}")
-
-          # ===== Summary =====
-          print(f"\n{'='*50}")
-          print(f"Applied: {applied}  Skipped: {skipped}  Errors: {len(errors)}")
-          if errors:
-              for e in errors: print(f"  ERR: {e}")
-          blocking = [e for e in errors if "not found" in e.lower() or "not matched" in e.lower()]
-          if blocking:
-              print(f"\nBlocking errors: {len(blocking)}")
-              sys.exit(1)
-          print("Done.")
-          PYEOF
+        run: python3 scripts/apply_optimizations.py
 
       - name: Check and commit
         run: |
@@ -190,25 +36,25 @@ jobs:
             echo "No changes - optimizations already applied"
           else
             git diff --stat
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config user.name "yonggang-sys"
+            git config user.email "yonggang.zhao@gmail.com"
             git add -A
             git commit -m "Phase 2-4: efficiency optimizations
 
-Phase 2 (ci_emit.py):
-- EM_PUSH2_HOSTS: push2delay first
-- em_clist_items/fetch_em_fundflow: serial -> parallel racing (ThreadPoolExecutor)
-- Timeout: 20s -> 8s, 12s cap
+      Phase 2 (ci_emit.py):
+      - EM_PUSH2_HOSTS: push2delay first
+      - em_clist_items/fetch_em_fundflow: serial -> parallel racing
+      - Timeout: 20s -> 8s, 12s cap
 
-Phase 3 (analyzer.py):
-- is_rate_limit: detect 503/Service Unavailable/overloaded/high demand
-- stream->non-stream: skip retry on quota errors
+      Phase 3 (analyzer.py):
+      - is_rate_limit: detect 503/Service Unavailable/overloaded/high demand
+      - stream->non-stream: skip retry on quota errors
 
-Phase 4 (00-daily-analysis.yml):
-- sleep 15->5, remove pip upgrade
-- GEMINI_REQUEST_DELAY: vars(default 0.5)
-- MAX_WORKERS: default 3
-- GEMINI_API_KEYS multi-key detection"
+      Phase 4 (00-daily-analysis.yml):
+      - sleep 15->5, remove pip upgrade
+      - GEMINI_REQUEST_DELAY: vars(default 0.5)
+      - MAX_WORKERS: default 3
+      - GEMINI_API_KEYS multi-key detection"
             git push
           fi
 
@@ -233,30 +79,7 @@ Phase 4 (00-daily-analysis.yml):
                 title: 'Phase 2-4: Efficiency Optimizations',
                 head: 'feature/efficiency-optimization',
                 base: 'main',
-                body: `## Phase 2-4 Efficiency Optimizations
-
-### Phase 2: ci_emit.py - Parallel Host Racing
-- **Problem**: Serial host fallback 20s x 4 = 80s worst case per request
-- **Fix**: ThreadPoolExecutor parallel racing, 8s timeout, 12s cap
-- **Impact**: 80s -> 12s (6.7x improvement)
-
-### Phase 3: analyzer.py - 503/Quota Detection
-- **Problem**: Gemini 503 not detected, wasted non-stream retries on exhausted key
-- **Fix**: is_rate_limit expanded, quota check before non-stream retry
-
-### Phase 4: Workflow YAML
-- sleep 15s -> 5s, remove pip upgrade
-- GEMINI_REQUEST_DELAY: vars (default 0.5s)
-- MAX_WORKERS: default 3
-- GEMINI_API_KEYS multi-key support
-
-### Phase 1: Manual Config Required
-| Setting | Type | Value |
-|---------|------|-------|
-| MAX_WORKERS | Variables | 3 |
-| GEMINI_REQUEST_DELAY | Variables | 0.5 |
-| DEEPSEEK_API_KEY | Secrets | (your key) |
-| GEMINI_API_KEYS | Secrets | key1,key2,key3 |`
+                body: `## Phase 2-4 Efficiency Optimizations\n\n      ### Phase 2: ci_emit.py - Parallel Host Racing\n      - **Problem**: Serial host fallback 20s x 4 = 80s worst case per request\n      - **Fix**: ThreadPoolExecutor parallel racing, 8s timeout, 12s cap\n      - **Impact**: 80s -> 12s (6.7x improvement)\n\n      ### Phase 3: analyzer.py - 503/Quota Detection\n      - **Problem**: Gemini 503 not detected, wasted non-stream retries on exhausted key\n      - **Fix**: is_rate_limit expanded, quota check before non-stream retry\n\n      ### Phase 4: Workflow YAML\n      - sleep 15s -> 5s, remove pip upgrade\n      - GEMINI_REQUEST_DELAY: vars (default 0.5s)\n      - MAX_WORKERS: default 3\n      - GEMINI_API_KEYS multi-key support\n\n      ### Phase 1: Manual Config Required\n      | Setting | Type | Value |\n      |---------|------|-------|\n      | MAX_WORKERS | Variables | 3 |\n      | GEMINI_REQUEST_DELAY | Variables | 0.5 |\n      | DEEPSEEK_API_KEY | Secrets | (your key) |\n      | GEMINI_API_KEYS | Secrets | key1,key2,key3 |`
               });
               console.log(`PR created: ${pr.html_url}`);
             }
