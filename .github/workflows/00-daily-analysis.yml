@@ -621,7 +621,7 @@ jobs:
               echo "  SearXNG Public Instances: ❌ 已禁用"
               ;;
             "")
-              echo "  SearXNG Public Instances: ✅ 默认开启"
+              echo "  SearXNG Public Instances: ❌ 已禁用（未配置，默认关闭）"
               ;;
             *)
               echo "  SearXNG Public Instances: ✅ 已启用"
