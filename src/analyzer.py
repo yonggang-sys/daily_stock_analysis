@@ -2812,7 +2812,10 @@ class GeminiAnalyzer:
                     err_text = str(e)
                     is_rate_limit = ("429" in err_text or "rate_limit" in err_text.lower()
                                      or "Resource Exhausted" in err_text
-                                     or "quota" in err_text.lower())
+                                     or "quota" in err_text.lower()
+                                     or "503" in err_text
+                                     or "service unavailable" in err_text.lower()
+                                     or "overloaded" in err_text.lower())
                     if is_rate_limit and idx < len(keys) - 1:
                         logger.warning(f"Gemini key #{idx+1} rate-limited (429), rotating to next key...")
                         time.sleep(1.0)  # brief backoff before next key
@@ -3504,6 +3507,23 @@ class GeminiAnalyzer:
                     if response_validator is not None:
                         response_validator(_stream_text)
                     return _stream_text, model, _stream_usage
+
+                # Quota check: skip non-stream fallback if stream error was quota/rate-limit/503
+                if last_error is not None:
+                    _err_text = str(last_error)
+                    _is_quota = ("429" in _err_text or "rate_limit" in _err_text.lower()
+                                 or "Resource Exhausted" in _err_text
+                                 or "quota" in _err_text.lower()
+                                 or "503" in _err_text
+                                 or "service unavailable" in _err_text.lower()
+                                 or "overloaded" in _err_text.lower())
+                    if _is_quota:
+                        logger.warning(
+                            "[LiteLLM] %s stream error is quota/rate-limit/503, skipping non-stream fallback: %s",
+                            model,
+                            _err_text[:200],
+                        )
+                        raise last_error
 
                 response = call_litellm_with_param_recovery(
                     lambda kwargs: self._dispatch_litellm_completion(
