@@ -359,6 +359,107 @@ class RuntimeSchedulerService:
             )
             return DEFAULT_RUNTIME_SCHEDULER_TIMEOUT_SECONDS
 
+    def _build_timeout_last_error(
+        self,
+        *,
+        timeout_seconds: int,
+        run_started_at: datetime,
+        stock_codes: Optional[List[str]],
+    ) -> str:
+        """Collect partial DB results and build a structured timeout error.
+
+        Notify-channel failures are fail-open and do not change this string.
+        Collect/import failures are also fail-open: this may return a
+        ``completed=0`` structured message (indistinguishable from no saved
+        rows) or, if the helper itself raises, the baseline timeout fallback.
+        ``status().last_error`` therefore cannot be used as a collect-failure
+        signal; grep ``Failed to collect completed analyses after timeout``
+        or ``Timeout partial delivery failed open``.
+        """
+        fallback = f"runtime scheduled analysis timed out after {timeout_seconds}s"
+        try:
+            from src.services.analysis_timeout_partial import handle_runtime_analysis_timeout
+
+            config = None
+            try:
+                config = self._config_provider()
+            except Exception as exc:  # noqa: BLE001 - config is optional for diagnostics
+                logger.warning("Timeout partial notify could not load config: %s", exc)
+
+            no_notify = bool(getattr(self._make_schedule_args(), "no_notify", False))
+            outcome = handle_runtime_analysis_timeout(
+                timeout_seconds=timeout_seconds,
+                run_started_at=run_started_at,
+                stock_codes=stock_codes,
+                no_notify=no_notify,
+                config=config,
+            )
+            if outcome.notified:
+                logger.info(
+                    "Timeout partial notification sent: completed=%s pending=%s",
+                    len(outcome.completed),
+                    len(outcome.pending_codes),
+                )
+            elif outcome.notify_skipped_reason:
+                logger.info(
+                    "Timeout partial notification skipped (%s): completed=%s pending=%s",
+                    outcome.notify_skipped_reason,
+                    len(outcome.completed),
+                    len(outcome.pending_codes),
+                )
+            return outcome.error_message or fallback
+        except Exception as exc:  # noqa: BLE001 - never lose the original timeout signal
+            logger.warning("Timeout partial delivery failed open: %s", exc)
+            return fallback
+
+    def _apply_timeout_partial_outcome(self, context: Dict[str, Any]) -> None:
+        """Enrich timeout diagnostics after the run lock is released.
+
+        Runs in a daemon thread so DB/import work cannot delay the next run or
+        keep the watchdog finally block occupied.
+
+        Consistency with ``status()``:
+        - The watchdog first writes a baseline ``timed out after Ns`` string
+          under ``_analysis_process_lock``, then releases ``_run_lock``.
+        - This thread later replaces ``_last_error`` with the structured
+          completed/pending message, still under ``_analysis_process_lock``.
+        - The replace is skipped if ``generation`` no longer matches (a newer
+          run started) or if ``_last_error`` no longer contains
+          ``timed out after`` (another outcome already replaced it).
+        - ``status()`` reads ``_last_error`` without that lock. CPython
+          pointer assignment is atomic, so callers observe either the baseline
+          or the fully replaced string—never a torn mix. They may briefly see
+          the baseline until this thread finishes.
+        - Notify-channel exceptions stay inside this thread and cannot
+          re-acquire ``_run_lock``. Collect/import fail-open is only visible
+          in warning logs, not as a distinct ``last_error`` code.
+        """
+        generation = context.get("generation")
+
+        def _enrich() -> None:
+            try:
+                enriched = self._build_timeout_last_error(
+                    timeout_seconds=int(context["timeout_seconds"]),
+                    run_started_at=context["run_started_at"],
+                    stock_codes=context.get("stock_codes"),
+                )
+            except Exception as exc:  # noqa: BLE001 - baseline timeout error remains
+                logger.warning("Timeout partial enrichment failed open: %s", exc)
+                return
+            with self._analysis_process_lock:
+                if generation is not None and generation != self._analysis_generation:
+                    return
+                current = self._last_error or ""
+                if "timed out after" not in current:
+                    return
+                self._last_error = enriched
+
+        threading.Thread(
+            target=_enrich,
+            daemon=True,
+            name="runtime-timeout-partial",
+        ).start()
+
     def _run_analysis_with_watchdog(
         self,
         stock_codes: Optional[List[str]] = None,
@@ -374,6 +475,7 @@ class RuntimeSchedulerService:
                 generation = self._analysis_generation
 
         result_queue = None
+        timeout_partial_context: Optional[Dict[str, Any]] = None
         try:
             context = multiprocessing.get_context("spawn")
             result_queue = context.Queue()
@@ -383,12 +485,13 @@ class RuntimeSchedulerService:
                 name="runtime-scheduled-analysis",
             )
             timeout = self._analysis_timeout_seconds()
+            run_started_at = datetime.now()
             with self._analysis_process_lock:
                 if generation != self._analysis_generation:
                     return
                 process.start()
                 self._analysis_process = process
-                self._last_run_at = datetime.now().isoformat()
+                self._last_run_at = run_started_at.isoformat()
 
             result = None
             deadline = time.monotonic() + timeout
@@ -411,7 +514,16 @@ class RuntimeSchedulerService:
                 with self._analysis_process_lock:
                     if generation != self._analysis_generation:
                         return
-                    self._last_error = f"runtime scheduled analysis timed out after {timeout}s"
+                    # Baseline error first so status.running can clear quickly.
+                    self._last_error = (
+                        f"runtime scheduled analysis timed out after {timeout}s"
+                    )
+                    timeout_partial_context = {
+                        "timeout_seconds": timeout,
+                        "run_started_at": run_started_at,
+                        "stock_codes": stock_codes,
+                        "generation": generation,
+                    }
                 return
 
             if result is None:
@@ -457,6 +569,8 @@ class RuntimeSchedulerService:
             if result_queue is not None:
                 result_queue.cancel_join_thread()
                 result_queue.close()
+            if timeout_partial_context is not None:
+                self._apply_timeout_partial_outcome(timeout_partial_context)
 
     def _start_analysis_watchdog(
         self,
@@ -682,6 +796,8 @@ class RuntimeSchedulerService:
             "next_run_at": next_run,
             "last_run_at": self._last_run_at,
             "last_success_at": self._last_success_at,
+            # Unlocked read: may briefly show the baseline timeout string
+            # until _apply_timeout_partial_outcome finishes. See that method.
             "last_error": self._last_error,
             "last_skipped_at": self._last_skipped_at,
             "last_skip_reason": self._last_skip_reason,
