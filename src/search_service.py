@@ -11,16 +11,19 @@ A股自选股智能分析系统 - 搜索服务模块
 4. 搜索结果缓存和格式化
 """
 
+import json
 import logging
 import multiprocessing
+import os
 import re
 import threading
 import time
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Callable
 from itertools import cycle
 from urllib.parse import parse_qsl, unquote, urlparse
 import requests
@@ -42,6 +45,7 @@ from src.config import (
 from src.data.stock_mapping import (
     canonicalize_foreign_stock_code,
     foreign_stock_english_aliases,
+    STOCK_NAME_MAP,
 )
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
 
@@ -2230,6 +2234,446 @@ class SearXNGSearchProvider(BaseSearchProvider):
         )
 
 
+class DirectNewsSearchProvider(BaseSearchProvider):
+    """
+    零 Key 直连新闻源（最高优先级，置于 provider 链最前）。
+
+    不依赖任何搜索 API Key，直接抓取 A 股市场公开快讯/电报流：
+      1. 东方财富 7x24 快讯（首选）
+      2. 同花顺 快讯
+      3. 财联社 电报
+      4. 新浪 滚动新闻
+
+    四路使用 ThreadPoolExecutor(max_workers=4) 并行竞速，每源超时 8s，
+    首个返回 >= MIN_VALID(默认 5) 条有效新闻的源胜出；全部失败则回退本地缓存。
+    个股新闻：当 topic 为股票名/代码时，从全市场快讯中过滤标题/内容含该名或代码的条目。
+
+    注意（缓存持久化边界）：GitHub Actions 发布步用孤儿分支仅 force-push 5 类固定产物，
+    latest.meta.json 由 printf 模板覆盖、3 个 for 循环 JSON 为每次 run 全新产出且不被下一
+    次分析读取，因此新闻缓存无法跨 run 持久化到 ci-reports（不修改 workflow / ci_emit.py 前提
+    下架构上不可行）。本类缓存仅作「同一次运行内」兜底（进程内内存 + data/news_cache.json 文件）。
+    """
+
+    # 竞速参数
+    SOURCE_TIMEOUT = 8          # 单源超时（秒）
+    MIN_VALID = 5               # 判定「胜出」所需最少有效条数
+    CACHE_MAX_AGE_SECONDS = 24 * 3600  # 缓存最大有效期（1 天）
+    NAME = "DirectNews"
+
+    # 数据源开关（默认全开）
+    _ENV_TOGGLES = {
+        "Eastmoney": "NEWS_EASTMONEY_ENABLED",
+        "10jqka": "NEWS_10JQKA_ENABLED",
+        "CLS": "NEWS_CLS_ENABLED",
+        "Sina": "NEWS_SINA_ENABLED",
+    }
+
+    _UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+
+    def __init__(self, api_keys: Optional[List[str]] = None, name: str = NAME):
+        # 零 Key：传入空列表，并强制 is_available 返回 True
+        super().__init__([], name)
+        self._sources = []
+        enabled_map = {
+            src: os.getenv(env_var, "true").strip().lower() not in ("0", "false", "no", "off")
+            for src, env_var in self._ENV_TOGGLES.items()
+        }
+        if enabled_map.get("Eastmoney", True):
+            self._sources.append({"name": "Eastmoney", "enabled": True, "method": "_fetch_eastmoney"})
+        if enabled_map.get("10jqka", True):
+            self._sources.append({"name": "10jqka", "enabled": True, "method": "_fetch_10jqka"})
+        if enabled_map.get("CLS", True):
+            self._sources.append({"name": "CLS", "enabled": True, "method": "_fetch_cls"})
+        if enabled_map.get("Sina", True):
+            self._sources.append({"name": "Sina", "enabled": True, "method": "_fetch_sina"})
+        self._mem_cache: Dict[str, Tuple[float, SearchResponse]] = {}
+        self._lock = threading.RLock()
+        self._cache_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "news_cache.json"
+        )
+
+    @property
+    def is_available(self) -> bool:
+        """零 Key 源始终可用（仅在全部子源被环境变量关闭时为 False）。"""
+        return bool(self._sources)
+
+    # ---- 公共入口：覆盖基类 search，绕过 Key 逻辑 ----
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        started = time.time()
+        stock_terms = self._stock_terms(query)
+
+        items = self._race_fetch(days)
+        if stock_terms:
+            items = [it for it in items if self._matches_terms(it, stock_terms)]
+
+        if items:
+            results = items[:max_results]
+            resp = SearchResponse(
+                query=query,
+                results=results,
+                provider=self.name,
+                success=True,
+                search_time=time.time() - started,
+            )
+            self._save_cache(query, items, stock_terms)
+            return resp
+
+        # 全部直连源失败 / 过滤后为空 → 本地缓存兜底
+        cached = self._load_cache(query, stock_terms)
+        if cached is not None and cached.results:
+            logger.info("[DirectNews] 全部直连源失败，使用本地缓存兜底（%s 条）", len(cached.results))
+            cached.search_time = time.time() - started
+            return cached
+
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider=self.name,
+            success=False,
+            error_message="所有直连新闻源均失败且无可用缓存",
+            search_time=time.time() - started,
+        )
+
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+        """基类抽象方法实现；实际搜索由覆盖的 search() 直接完成（无需 Key）。"""
+        return self.search(query, max_results, days=days)
+
+    # ---- 并行竞速 ----
+    def _race_fetch(self, days: int) -> List[SearchResult]:
+        enabled = [s for s in self._sources if s["enabled"]]
+        if not enabled:
+            return []
+        futures = {}
+        with ThreadPoolExecutor(max_workers=min(4, len(enabled))) as ex:
+            for src in enabled:
+                fut = ex.submit(self._safe_fetch, src, days)
+                futures[fut] = src["name"]
+            winner: List[SearchResult] = []
+            partials: List[Tuple[int, List[SearchResult]]] = []
+            try:
+                for fut in as_completed(futures, timeout=self.SOURCE_TIMEOUT):
+                    name = futures[fut]
+                    try:
+                        items = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[DirectNews] 源 %s 异常: %s", name, exc)
+                        items = []
+                    valid = [it for it in items if self._is_valid(it, days)]
+                    if len(valid) >= self.MIN_VALID:
+                        winner = valid
+                        for f in futures:
+                            if not f.done():
+                                f.cancel()
+                        break
+                    partials.append((len(valid), valid))
+            except FuturesTimeoutError:
+                logger.warning("[DirectNews] 竞速超时(%ss)，取已有最佳结果", self.SOURCE_TIMEOUT)
+
+        if winner:
+            return winner
+        partials.sort(key=lambda x: x[0], reverse=True)
+        if partials and partials[0][0] > 0:
+            return partials[0][1]
+        return []
+
+    def _safe_fetch(self, src: Dict[str, Any], days: int) -> List[SearchResult]:
+        try:
+            return getattr(self, src["method"])(days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DirectNews] %s 抓取失败: %s", src["name"], exc)
+            return []
+
+    # ---- 有效性 / 时间窗 ----
+    @staticmethod
+    def _is_valid(item: SearchResult, days: int) -> bool:
+        if not item or not (item.title and item.title.strip()):
+            return False
+        if not (item.url and item.url.strip()) and not (item.snippet and item.snippet.strip()):
+            return False
+        pub = DirectNewsSearchProvider._norm_pub(item.published_date)
+        if pub is None:
+            return False
+        return DirectNewsSearchProvider._within_window(pub, days)
+
+    @staticmethod
+    def _norm_pub(value: Any) -> Optional[str]:
+        """将多种时间表示规整为 'YYYY-MM-DD HH:MM:SS' 字符串；无法解析返回 None。"""
+        if value is None:
+            return None
+        s = str(value).strip()
+        if not s:
+            return None
+        # 纯数字：10 位秒 / 13 位毫秒
+        if s.isdigit():
+            try:
+                n = int(s)
+                ts = n / 1000.0 if n > 1e12 else float(n)
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except (OSError, OverflowError, ValueError):
+                return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                    "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+        return s  # 透传，交由上层 _normalize_news_publish_date 再解析
+
+    @staticmethod
+    def _within_window(pub_str: str, days: int) -> bool:
+        try:
+            d = datetime.strptime(pub_str[:19], "%Y-%m-%d %H:%M:%S").date()
+        except ValueError:
+            return True  # 解析不出日期则不过滤（保守保留）
+        today = datetime.now().date()
+        earliest = today - timedelta(days=max(0, int(days) - 1))
+        latest = today + timedelta(days=1)
+        return earliest <= d <= latest
+
+    # ---- 个股过滤 ----
+    @classmethod
+    def _stock_terms(cls, topic: str) -> List[str]:
+        """若 topic 为股票名/代码，返回用于子串匹配的 term 列表；否则返回空。"""
+        t = (topic or "").strip()
+        if not t:
+            return []
+        # 6 位代码（可带交易所后缀）
+        m = re.match(r"^(\d{6})(?:\.(SH|SZ|SS|BJ))?$", t.upper())
+        if m:
+            code = m.group(1)
+            name = STOCK_NAME_MAP.get(code)
+            terms = [code]
+            if name:
+                terms.append(name)
+            # 去掉前缀的裸码（如 sh600519 -> 600519 已在 terms）
+            return terms
+        # 直接是股票名
+        if t in STOCK_NAME_MAP.values():
+            code = [c for c, n in STOCK_NAME_MAP.items() if n == t]
+            terms = [t]
+            terms.extend(code)
+            return terms
+        return []
+
+    @staticmethod
+    def _matches_terms(item: SearchResult, terms: List[str]) -> bool:
+        hay = f"{item.title or ''} {item.snippet or ''}".lower()
+        return any(term.lower() in hay for term in terms)
+
+    # ---- 本地缓存（同 run 兜底）----
+    def _save_cache(self, query: str, items: List[SearchResult], stock_terms: List[str]) -> None:
+        now = time.time()
+        # 全局全市场快照（过滤前），供个股 topic 回退时再过滤
+        self._write_cache_entry("__global__", SearchResponse(
+            query="__global__", results=items, provider=self.name, success=True))
+        if stock_terms:
+            filtered = [it for it in items if self._matches_terms(it, stock_terms)]
+            if filtered:
+                self._write_cache_entry(query, SearchResponse(
+                    query=query, results=filtered, provider=self.name, success=True))
+        else:
+            self._write_cache_entry(query, SearchResponse(
+                query=query, results=items, provider=self.name, success=True))
+        # 内存
+        with self._lock:
+            self._mem_cache["__global__"] = (now, SearchResponse(
+                query="__global__", results=items, provider=self.name, success=True))
+            if stock_terms:
+                filtered = [it for it in items if self._matches_terms(it, stock_terms)]
+                if filtered:
+                    self._mem_cache[query] = (now, SearchResponse(
+                        query=query, results=filtered, provider=self.name, success=True))
+            else:
+                self._mem_cache[query] = (now, SearchResponse(
+                    query=query, results=items, provider=self.name, success=True))
+
+    def _write_cache_entry(self, key: str, resp: SearchResponse) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._cache_path), exist_ok=True)
+            data: Dict[str, Any] = {}
+            if os.path.exists(self._cache_path):
+                try:
+                    with open(self._cache_path, "r", encoding="utf-8") as fh:
+                        data = json.load(fh) or {}
+                except (ValueError, OSError):
+                    data = {}
+            data[key] = {
+                "saved_at": time.time(),
+                "query": resp.query,
+                "provider": resp.provider,
+                "success": resp.success,
+                "results": [vars(r) for r in resp.results],
+            }
+            with open(self._cache_path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+        except OSError as exc:
+            logger.warning("[DirectNews] 写缓存失败: %s", exc)
+
+    def _load_cache(self, query: str, stock_terms: List[str]) -> Optional[SearchResponse]:
+        # 1) 内存
+        with self._lock:
+            for key in (query, "__global__"):
+                if key in self._mem_cache:
+                    ts, resp = self._mem_cache[key]
+                    if time.time() - ts <= self.CACHE_MAX_AGE_SECONDS:
+                        return self._apply_stock_filter(resp, stock_terms)
+        # 2) 文件
+        if not os.path.exists(self._cache_path):
+            return None
+        try:
+            with open(self._cache_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh) or {}
+        except (ValueError, OSError):
+            return None
+        for key in (query, "__global__"):
+            entry = data.get(key)
+            if not entry:
+                continue
+            if time.time() - float(entry.get("saved_at", 0)) > self.CACHE_MAX_AGE_SECONDS:
+                continue
+            try:
+                resp = SearchResponse(
+                    query=entry.get("query", query),
+                    results=[SearchResult(**r) for r in entry.get("results", [])],
+                    provider=entry.get("provider", self.name),
+                    success=entry.get("success", True),
+                )
+            except TypeError:
+                continue
+            return self._apply_stock_filter(resp, stock_terms)
+        return None
+
+    @staticmethod
+    def _apply_stock_filter(resp: SearchResponse, stock_terms: List[str]) -> SearchResponse:
+        if not stock_terms:
+            return resp
+        filtered = [it for it in resp.results if DirectNewsSearchProvider._matches_terms(it, stock_terms)]
+        return SearchResponse(
+            query=resp.query, results=filtered, provider=resp.provider,
+            success=resp.success, error_message=resp.error_message, search_time=resp.search_time,
+        )
+
+    # ---- HTTP / JSONP 辅助 ----
+    @staticmethod
+    def _http_get_json(url: str, params: Optional[Dict[str, Any]] = None,
+                       headers: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+        hdrs = {"User-Agent": DirectNewsSearchProvider._UA}
+        if headers:
+            hdrs.update(headers)
+        try:
+            resp = requests.get(url, params=params, headers=hdrs, timeout=DirectNewsSearchProvider.SOURCE_TIMEOUT)
+            if resp.status_code != 200:
+                logger.warning("[DirectNews] GET %s -> HTTP %s", url, resp.status_code)
+                return None
+            return DirectNewsSearchProvider._parse_jsonp(resp.text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DirectNews] GET %s 失败: %s", url, exc)
+            return None
+
+    @staticmethod
+    def _parse_jsonp(text: str) -> Optional[Dict[str, Any]]:
+        t = (text or "").strip()
+        if not t:
+            return None
+        # 去 JSONP 包裹： jsonp(...) / jsonp1(...) / callback(...)
+        m = re.match(r"^\s*([A-Za-z_$][\w$]*)\s*\((.*)\)\s*;?\s*$", t, re.DOTALL)
+        if m:
+            t = m.group(2).strip()
+        try:
+            return json.loads(t)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _mk(title: str, snippet: str, url: str, source: str, pub: Any) -> SearchResult:
+        return SearchResult(
+            title=(title or "").strip(),
+            snippet=(snippet or "").strip(),
+            url=(url or "").strip(),
+            source=source,
+            published_date=DirectNewsSearchProvider._norm_pub(pub),
+        )
+
+    # ---- 四个数据源 ----
+    def _fetch_eastmoney(self, days: int) -> List[SearchResult]:
+        """东方财富 7x24 快讯（首选）。"""
+        url = "https://newsapi.eastmoney.com/kuaixun/v1/getlist_1024kuaixun_1_100.html"
+        params = {"sr": "-1", "nt": "-1", "page_index": "1", "page_size": "100", "callback": "jsonp"}
+        data = self._http_get_json(url, params=params)
+        if not data:
+            return []
+        inner = data.get("data") or {}
+        items = inner.get("list") or []
+        out: List[SearchResult] = []
+        for it in items:
+            title = it.get("title") or it.get("content") or ""
+            snippet = it.get("content") or it.get("remark") or it.get("summary") or ""
+            uid = it.get("unique_id") or it.get("id") or ""
+            url = it.get("url") or (f"https://kuaixun.eastmoney.com/{uid}.html" if uid else "https://kuaixun.eastmoney.com/")
+            pub = it.get("lash_time") or it.get("datetime") or it.get("time") or None
+            out.append(self._mk(title, snippet, url, "东方财富快讯", pub))
+        return out
+
+    def _fetch_10jqka(self, days: int) -> List[SearchResult]:
+        """同花顺 快讯。"""
+        url = "https://news.10jqka.com.cn/tapp/news/push/queryV3Articles"
+        params = {"firstIdx": "0", "num": "100", "type": "0"}
+        data = self._http_get_json(url, params=params, headers={"Referer": "https://news.10jqka.com.cn/"})
+        if not data:
+            return []
+        inner = data.get("data") or {}
+        items = inner.get("list") or []
+        out: List[SearchResult] = []
+        for it in items:
+            title = it.get("title") or it.get("brief") or ""
+            snippet = it.get("summary") or it.get("content") or it.get("digest") or ""
+            url = it.get("url") or ""
+            pub = it.get("time") or it.get("datetime") or it.get("date") or None
+            out.append(self._mk(title, snippet, url, "同花顺快讯", pub))
+        return out
+
+    def _fetch_cls(self, days: int) -> List[SearchResult]:
+        """财联社 电报。"""
+        url = "https://www.cls.cn/nodeapi/v1/telegram/list"
+        params = {"app": "CailianpressWeb", "os": "web", "sv": "7.7.5"}
+        data = self._http_get_json(url, params=params, headers={"Referer": "https://www.cls.cn/"})
+        if not data:
+            return []
+        inner = data.get("data") or {}
+        items = inner.get("telegram_list") or inner.get("list") or []
+        out: List[SearchResult] = []
+        for it in items:
+            title = it.get("title") or it.get("content") or ""
+            snippet = it.get("content") or it.get("title") or ""
+            cid = it.get("id") or ""
+            url = it.get("url") or (f"https://www.cls.cn/{cid}" if cid else "https://www.cls.cn/telegram")
+            pub = it.get("time") or it.get("ctime") or it.get("created_at") or None
+            out.append(self._mk(title, snippet, url, "财联社电报", pub))
+        return out
+
+    def _fetch_sina(self, days: int) -> List[SearchResult]:
+        """新浪 滚动新闻。"""
+        url = "https://feed.mix.sina.com.cn/api/roll/get"
+        params = {"pageid": "153", "lid": "2516", "num": "100", "page": "1"}
+        data = self._http_get_json(url, params=params, headers={"Referer": "https://news.sina.com.cn/"})
+        if not data:
+            return []
+        inner = data.get("result") or {}
+        items = inner.get("data") or inner.get("list") or []
+        out: List[SearchResult] = []
+        for it in items:
+            title = it.get("title") or ""
+            snippet = it.get("intro") or it.get("summary") or it.get("content") or ""
+            url = it.get("url") or ""
+            pub = it.get("ctime") or it.get("time") or it.get("publish_time") or None
+            out.append(self._mk(title, snippet, url, "新浪滚动新闻", pub))
+        return out
+
+
 class SearchService:
     """
     搜索服务
@@ -2493,7 +2937,13 @@ class SearchService:
         if anspire_keys:
             self._providers.insert(0, AnspireSearchProvider(anspire_keys))
             logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
-            
+
+        # 0. DirectNews（零 Key 直连源，最高优先级，置于链最前、优先于 Anspire）
+        #    NEWS_DIRECT_ENABLED=false 时禁用；不依赖任何 API Key。
+        if os.getenv("NEWS_DIRECT_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"):
+            self._providers.insert(0, DirectNewsSearchProvider())
+            logger.info("已启用 DirectNews 零 Key 直连新闻源（东财/同花顺/财联社/新浪 并行竞速）")
+
         if not self._providers:
             logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")
 
