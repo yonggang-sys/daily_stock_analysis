@@ -144,6 +144,12 @@ jobs:
             stock-data-
 
       - name: Key 连通性预检
+        env:
+          # 三级降级链密钥（PR #3）：注入后此步可打印 Zhipu/OpenRouter 配置状态，便于 CI 验证
+          ZHIPU_API_KEYS: ${{ secrets.ZHIPU_API_KEYS }}
+          LLM_ZHIPU_API_KEYS: ${{ secrets.LLM_ZHIPU_API_KEYS }}
+          OPENROUTER_API_KEYS: ${{ secrets.OPENROUTER_API_KEYS }}
+          LLM_OPENROUTER_API_KEYS: ${{ secrets.LLM_OPENROUTER_API_KEYS }}
         run: |
           echo "=========================================="
           echo "🔑 LLM Key 配置检查"
@@ -157,6 +163,8 @@ jobs:
             'Anthropic': os.getenv('ANTHROPIC_API_KEY'),
             'AIHubMix': os.getenv('AIHUBMIX_KEY'),
             'LiteLLM': os.getenv('LITELLM_API_KEY'),
+            'Zhipu (GLM)': os.getenv('ZHIPU_API_KEYS') or os.getenv('LLM_ZHIPU_API_KEYS'),
+            'OpenRouter': os.getenv('OPENROUTER_API_KEYS') or os.getenv('LLM_OPENROUTER_API_KEYS'),
           }
           configured = 0
           for name, key in keys.items():
@@ -216,7 +224,14 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
           GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
           GEMINI_REQUEST_DELAY: ${{ vars.GEMINI_REQUEST_DELAY || '0.5' }}
-          
+
+          # ===== 三级降级链新增密钥（PR #3: Gemini→GLM/智谱→OpenRouter）=====
+          # config.py 优先读 ZHIPU_API_KEYS / OPENROUTER_API_KEYS，并兼容既有
+          # LLM_ZHIPU_API_KEYS / LLM_OPENROUTER_API_KEYS 别名；此处补齐 canonical 名，
+          # 保证仓库 secret 无论命名为 ZHIPU_API_KEYS 还是 LLM_ZHIPU_API_KEYS 都能注入。
+          ZHIPU_API_KEYS: ${{ secrets.ZHIPU_API_KEYS }}
+          OPENROUTER_API_KEYS: ${{ secrets.OPENROUTER_API_KEYS }}
+
           # AIHubMix（优先于 OPENAI_API_KEY，自动适配 base_url，推荐国内用户）
           AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}
 
