@@ -37,10 +37,14 @@ json-repair>=0.55.1         # JSON repair
 orjson>=3.10,<4             # LiteLLM runtime JSON dependency; explicitly bundled in desktop builds
 
 # AI analysis
+# Three-tier provider fallback chain: Gemini -> GLM/Zhipu -> OpenRouter.
+# See src/llm/provider_chain.py, src/llm/provider_error.py and src/llm/openrouter_quota.py.
 # Keep the historical minimum version while excluding quarantined builds and avoiding future major breaks.
-litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0   # Unified LLM client (Gemini/Anthropic/OpenAI/DeepSeek etc.)
+litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0   # Unified LLM client (Gemini/GLM/OpenRouter/Anthropic/OpenAI/DeepSeek etc.)
 tiktoken>=0.8.0,<0.12.0    # BPE tokenizer for LLM token counting (pin <0.12 to avoid plugin registration issues, #537)
-openai>=1.0.0               # OpenAI SDK (transitive dependency of litellm, kept explicit)
+openai>=1.30.0              # OpenAI SDK (transitive dependency of litellm, kept explicit)
+anthropic>=0.30.0           # Anthropic SDK (tier-1 alternative provider via litellm)
+zhipuai>=2.0.0              # GLM / 智谱 official SDK, required by the litellm "zhipuai/" provider (fallback tier 2)
 PyYAML>=6.0                 # YAML parser for LITELLM_CONFIG support
 
 # Search engines for stock news

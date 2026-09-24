@@ -128,6 +128,15 @@ TICKFLOW_KLINE_ADJUST_VALUES = {"none", "forward", "backward", "forward_additive
 ANSPIRE_LLM_BASE_URL_DEFAULT = "https://open-gateway.anspire.cn/v6"
 ANSPIRE_LLM_MODEL_DEFAULT = "Doubao-Seed-2.0-lite"
 
+# === Three-tier LLM fallback (Gemini -> GLM/Zhipu -> OpenRouter) ===
+# Second tier: GLM / 智谱 AI. LiteLLM routes this through its native "zhipuai"
+# provider, so the model name must carry that prefix.
+ZHIPU_MODEL_DEFAULT = "zhipuai/glm-4.6"
+# Third tier: OpenRouter. Its free allowance is tiny (OPENROUTER_QUOTA_DAILY_LIMIT),
+# so this tier is quota-gated and only reachable after the earlier tiers fail.
+OPENROUTER_MODEL_DEFAULT = "openrouter/deepseek/deepseek-chat"
+LLM_PROVIDER_TIERS_DEFAULT = ("gemini", "zhipu", "openrouter")
+
 
 def _has_ntfy_topic_endpoint(value: Optional[str]) -> bool:
     """Return whether an ntfy URL points at a concrete topic endpoint."""
@@ -910,6 +919,42 @@ class Config:
     litellm_model: str = ""  # Primary model; must include provider prefix when set explicitly
     litellm_fallback_models: List[str] = field(default_factory=list)  # Cross-model fallback list
 
+    # --- Three-tier provider fallback (new) ---
+    # ZHIPU_API_KEYS / LLM_ZHIPU_API_KEYS -> GLM (智谱) keys, second tier.
+    zhipu_api_keys: List[str] = field(default_factory=list)
+    # OPENROUTER_API_KEYS -> OpenRouter keys, third (quota-protected) tier.
+    openrouter_api_keys: List[str] = field(default_factory=list)
+    # Ordered provider tiers the analyzer walks, derived from configured keys.
+    llm_provider_tiers: List[str] = field(default_factory=list)
+    # LLM_FALLBACK_CHAIN_ENABLED: master switch for error-class-aware fallback.
+    llm_fallback_chain_enabled: bool = True
+    # LLM_FALLBACK_MAX_IN_PLACE_RETRIES: transient retries before downgrading a tier.
+    llm_fallback_max_in_place_retries: int = 2
+    llm_fallback_backoff_base_seconds: float = 1.0
+    llm_fallback_backoff_max_seconds: float = 30.0
+    # LLM_JSON_OUTPUT_MODE: auto | on | off. Forces provider-native JSON output.
+    llm_json_output_mode: str = "auto"
+    # --- OpenRouter quota protection ---
+    openrouter_quota_guard_enabled: bool = True
+    openrouter_quota_daily_limit: int = 50
+    openrouter_quota_reserve_after: int = 45
+    openrouter_quota_per_run_cap: int = 0
+    openrouter_quota_file: str = ""
+    openrouter_quota_meta_file: str = ""
+    # --- Token-bucket rate limiting (RPM per provider) ---
+    llm_provider_rate_limit_enabled: bool = True
+    llm_provider_rpm_gemini: int = 10
+    llm_provider_rpm_zhipu: int = 60
+    llm_provider_rpm_openrouter: int = 5
+    llm_provider_rpm_gha_halve: bool = True
+    # --- SQLite LLM result cache ---
+    llm_cache_enabled: bool = True
+    llm_cache_ttl_seconds: int = 24 * 60 * 60
+    llm_cache_path: str = ""
+    # --- Startup provider health precheck ---
+    llm_provider_precheck_enabled: bool = True
+    llm_provider_precheck_timeout_seconds: float = 10.0
+
     # Unified temperature for all LLM calls (LLM_TEMPERATURE); legacy per-provider temps are fallback only
     llm_temperature: float = 0.7
 
@@ -1478,6 +1523,25 @@ class Config:
             if _single_deepseek:
                 deepseek_api_keys = [_single_deepseek]
 
+        # ZHIPU_API_KEYS > ZHIPU_API_KEY (LLM_ZHIPU_API_KEYS accepted as an alias).
+        # Second fallback tier (GLM / 智谱); see LLM_FALLBACK_* / OPENROUTER_QUOTA_*.
+        _zhipu_keys_raw = os.getenv('ZHIPU_API_KEYS', '') or os.getenv('LLM_ZHIPU_API_KEYS', '')
+        zhipu_api_keys = [k.strip() for k in _zhipu_keys_raw.split(',') if k.strip()]
+        if not zhipu_api_keys:
+            _single_zhipu = os.getenv('ZHIPU_API_KEY', '').strip()
+            if _single_zhipu:
+                zhipu_api_keys = [_single_zhipu]
+
+        # OPENROUTER_API_KEYS > OPENROUTER_API_KEY.
+        # Third and last fallback tier; its free daily quota is scarce, so it is
+        # gated by OPENROUTER_QUOTA_* (see src/llm/openrouter_quota.py).
+        _openrouter_keys_raw = os.getenv('OPENROUTER_API_KEYS', '')
+        openrouter_api_keys = [k.strip() for k in _openrouter_keys_raw.split(',') if k.strip()]
+        if not openrouter_api_keys:
+            _single_openrouter = os.getenv('OPENROUTER_API_KEY', '').strip()
+            if _single_openrouter:
+                openrouter_api_keys = [_single_openrouter]
+
         # Anspire Open shares the same key as Anspire Search and exposes an
         # OpenAI-compatible LLM gateway.  When no other OpenAI-compatible key is
         # configured, use ANSPIRE_API_KEYS as the legacy openai-compatible
@@ -1579,6 +1643,8 @@ class Config:
                 gemini_api_keys, anthropic_api_keys, openai_api_keys,
                 openai_base_url,
                 deepseek_api_keys,
+                zhipu_api_keys,
+                openrouter_api_keys,
             )
             if llm_model_list:
                 llm_models_source = "legacy_env"
@@ -1606,6 +1672,65 @@ class Config:
                 if litellm_model.startswith('gemini/') and _gemini_fallback:
                     _fb = f'gemini/{_gemini_fallback}' if '/' not in _gemini_fallback else _gemini_fallback
                     litellm_fallback_models = [_fb]
+
+        # === Three-tier provider chain: Gemini -> GLM/Zhipu -> OpenRouter ===
+        # Model ids for tiers 2 and 3 are environment-configurable; the tier list
+        # itself is derived from the keys that are actually present, so the
+        # analyzer only ever walks providers it can authenticate against.
+        _zhipu_models_env = os.getenv('LLM_ZHIPU_MODELS', '').strip()
+        if _zhipu_models_env:
+            zhipu_models = [m.strip() for m in _zhipu_models_env.split(',') if m.strip()]
+        else:
+            _zhipu_model_name = os.getenv('ZHIPU_MODEL', '').strip() or ZHIPU_MODEL_DEFAULT
+            zhipu_models = [
+                _zhipu_model_name
+                if '/' in _zhipu_model_name
+                else f'zhipuai/{_zhipu_model_name}'
+            ]
+
+        _openrouter_models_env = os.getenv('LLM_OPENROUTER_MODELS', '').strip()
+        if _openrouter_models_env:
+            openrouter_models = [
+                m.strip() for m in _openrouter_models_env.split(',') if m.strip()
+            ]
+        else:
+            _openrouter_model_name = (
+                os.getenv('OPENROUTER_MODEL', '').strip() or OPENROUTER_MODEL_DEFAULT
+            )
+            openrouter_models = [
+                _openrouter_model_name
+                if _openrouter_model_name.startswith('openrouter/')
+                else f'openrouter/{_openrouter_model_name}'
+            ]
+
+        llm_provider_tiers: List[str] = []
+        _primary_provider = (
+            litellm_model.split('/', 1)[0] if litellm_model and '/' in litellm_model else ''
+        )
+        if gemini_api_keys or _primary_provider in ('gemini', 'vertex_ai'):
+            llm_provider_tiers.append('gemini')
+        if zhipu_api_keys:
+            llm_provider_tiers.append('zhipu')
+        if openrouter_api_keys:
+            llm_provider_tiers.append('openrouter')
+
+        # Append the new tiers to the fallback chain unless the operator pinned
+        # LITELLM_FALLBACK_MODELS or supplied a LiteLLM YAML config (both are
+        # treated as authoritative). A single-key Gemini setup therefore gains
+        # GLM -> OpenRouter automatically.
+        if (
+            not litellm_fallback_models_explicit
+            and not litellm_config_path
+            and llm_provider_tiers
+        ):
+            _chain_appendix = (
+                (zhipu_models if zhipu_api_keys else [])
+                + (openrouter_models if openrouter_api_keys else [])
+            )
+            for _candidate in _chain_appendix:
+                if _candidate and _candidate != litellm_model:
+                    if _candidate not in litellm_fallback_models:
+                        litellm_fallback_models.append(_candidate)
 
         if (
             inferred_legacy_deepseek_model
@@ -1820,6 +1945,105 @@ class Config:
             opencode_cli_model=opencode_cli_model,
             litellm_model=litellm_model,
             litellm_fallback_models=litellm_fallback_models,
+            zhipu_api_keys=zhipu_api_keys,
+            openrouter_api_keys=openrouter_api_keys,
+            llm_provider_tiers=llm_provider_tiers,
+            llm_fallback_chain_enabled=parse_env_bool(
+                os.getenv('LLM_FALLBACK_CHAIN_ENABLED'),
+                default=True,
+            ),
+            llm_fallback_max_in_place_retries=parse_env_int(
+                os.getenv('LLM_FALLBACK_MAX_IN_PLACE_RETRIES'),
+                2,
+                field_name='LLM_FALLBACK_MAX_IN_PLACE_RETRIES',
+                minimum=0,
+            ),
+            llm_fallback_backoff_base_seconds=parse_env_float(
+                os.getenv('LLM_FALLBACK_BACKOFF_BASE_SECONDS'),
+                1.0,
+                field_name='LLM_FALLBACK_BACKOFF_BASE_SECONDS',
+                minimum=0.0,
+            ),
+            llm_fallback_backoff_max_seconds=parse_env_float(
+                os.getenv('LLM_FALLBACK_BACKOFF_MAX_SECONDS'),
+                30.0,
+                field_name='LLM_FALLBACK_BACKOFF_MAX_SECONDS',
+                minimum=0.0,
+            ),
+            llm_json_output_mode=(
+                os.getenv('LLM_JSON_OUTPUT_MODE', 'auto').strip().lower() or 'auto'
+            ),
+            openrouter_quota_guard_enabled=parse_env_bool(
+                os.getenv('OPENROUTER_QUOTA_GUARD_ENABLED'),
+                default=True,
+            ),
+            openrouter_quota_daily_limit=parse_env_int(
+                os.getenv('OPENROUTER_QUOTA_DAILY_LIMIT'),
+                50,
+                field_name='OPENROUTER_QUOTA_DAILY_LIMIT',
+                minimum=1,
+            ),
+            openrouter_quota_reserve_after=parse_env_int(
+                os.getenv('OPENROUTER_QUOTA_RESERVE_AFTER'),
+                45,
+                field_name='OPENROUTER_QUOTA_RESERVE_AFTER',
+                minimum=0,
+            ),
+            openrouter_quota_per_run_cap=parse_env_int(
+                os.getenv('OPENROUTER_QUOTA_PER_RUN_CAP'),
+                0,
+                field_name='OPENROUTER_QUOTA_PER_RUN_CAP',
+                minimum=0,
+            ),
+            openrouter_quota_file=os.getenv('OPENROUTER_QUOTA_FILE', '').strip(),
+            openrouter_quota_meta_file=os.getenv('OPENROUTER_QUOTA_META_FILE', '').strip(),
+            llm_provider_rate_limit_enabled=parse_env_bool(
+                os.getenv('LLM_PROVIDER_RATE_LIMIT_ENABLED'),
+                default=True,
+            ),
+            llm_provider_rpm_gemini=parse_env_int(
+                os.getenv('LLM_PROVIDER_RPM_GEMINI'),
+                10,
+                field_name='LLM_PROVIDER_RPM_GEMINI',
+                minimum=0,
+            ),
+            llm_provider_rpm_zhipu=parse_env_int(
+                os.getenv('LLM_PROVIDER_RPM_ZHIPU'),
+                60,
+                field_name='LLM_PROVIDER_RPM_ZHIPU',
+                minimum=0,
+            ),
+            llm_provider_rpm_openrouter=parse_env_int(
+                os.getenv('LLM_PROVIDER_RPM_OPENROUTER'),
+                5,
+                field_name='LLM_PROVIDER_RPM_OPENROUTER',
+                minimum=0,
+            ),
+            llm_provider_rpm_gha_halve=parse_env_bool(
+                os.getenv('LLM_PROVIDER_RPM_GHA_HALVE'),
+                default=True,
+            ),
+            llm_cache_enabled=parse_env_bool(
+                os.getenv('LLM_CACHE_ENABLED'),
+                default=True,
+            ),
+            llm_cache_ttl_seconds=parse_env_int(
+                os.getenv('LLM_CACHE_TTL_SECONDS'),
+                24 * 60 * 60,
+                field_name='LLM_CACHE_TTL_SECONDS',
+                minimum=0,
+            ),
+            llm_cache_path=os.getenv('LLM_CACHE_PATH', '').strip(),
+            llm_provider_precheck_enabled=parse_env_bool(
+                os.getenv('LLM_PROVIDER_PRECHECK_ENABLED'),
+                default=True,
+            ),
+            llm_provider_precheck_timeout_seconds=parse_env_float(
+                os.getenv('LLM_PROVIDER_PRECHECK_TIMEOUT_SECONDS'),
+                10.0,
+                field_name='LLM_PROVIDER_PRECHECK_TIMEOUT_SECONDS',
+                minimum=0.0,
+            ),
             llm_temperature=resolve_unified_llm_temperature(litellm_model),
             litellm_config_path=litellm_config_path,
             llm_models_source=llm_models_source,
@@ -2652,6 +2876,8 @@ class Config:
         openai_keys: List[str],
         openai_base_url: Optional[str],
         deepseek_keys: Optional[List[str]] = None,
+        zhipu_keys: Optional[List[str]] = None,
+        openrouter_keys: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Build Router model_list from legacy per-provider keys (backward compat).
 
@@ -2703,6 +2929,29 @@ class Config:
                     'model_name': '__legacy_deepseek__',
                     'litellm_params': {
                         'model': '__legacy_deepseek__',
+                        'api_key': k,
+                    },
+                })
+
+        # GLM / 智谱 keys (second fallback tier). LiteLLM's native provider id is
+        # "zhipuai", so the alias matches the "zhipuai/..." model prefix.
+        for k in (zhipu_keys or []):
+            if k and len(k) >= 8:
+                model_list.append({
+                    'model_name': '__legacy_zhipuai__',
+                    'litellm_params': {
+                        'model': '__legacy_zhipuai__',
+                        'api_key': k,
+                    },
+                })
+
+        # OpenRouter keys (third, quota-protected fallback tier).
+        for k in (openrouter_keys or []):
+            if k and len(k) >= 8:
+                model_list.append({
+                    'model_name': '__legacy_openrouter__',
+                    'litellm_params': {
+                        'model': '__legacy_openrouter__',
                         'api_key': k,
                     },
                 })
@@ -3716,6 +3965,14 @@ def get_api_keys_for_model(model: str, config: Config) -> List[str]:
         return [k for k in config.deepseek_api_keys if k and len(k) >= 8]
     if provider == "openai":
         return [k for k in config.openai_api_keys if k and len(k) >= 8]
+    # Three-tier fallback additions: GLM (智谱) and OpenRouter. Both are
+    # LiteLLM-native providers whose SDK would otherwise read ZHIPUAI_API_KEY /
+    # OPENROUTER_API_KEY, but this project standardises on ZHIPU_API_KEY and
+    # OPENROUTER_API_KEYS, so the keys are passed explicitly.
+    if provider in {"zhipu", "zhipuai", "zai"}:
+        return [k for k in getattr(config, "zhipu_api_keys", []) if k and len(k) >= 8]
+    if provider == "openrouter":
+        return [k for k in getattr(config, "openrouter_api_keys", []) if k and len(k) >= 8]
     # Other LiteLLM-native providers – API key resolved from env vars
     return []
 
