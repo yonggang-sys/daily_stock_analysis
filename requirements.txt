@@ -44,7 +44,7 @@ litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0   # Unified LLM client (Gemini/GLM/Op
 tiktoken>=0.8.0,<0.12.0    # BPE tokenizer for LLM token counting (pin <0.12 to avoid plugin registration issues, #537)
 openai>=1.30.0              # OpenAI SDK (transitive dependency of litellm, kept explicit)
 anthropic>=0.30.0           # Anthropic SDK (tier-1 alternative provider via litellm)
-zhipuai>=2.0.0              # GLM / 智谱 official SDK, required by the litellm "zhipuai/" provider (fallback tier 2)
+zhipuai>=2.0.0              # GLM / Zhipu official SDK, required by the litellm "zhipuai/" provider (fallback tier 2)
 PyYAML>=6.0                 # YAML parser for LITELLM_CONFIG support
 
 # Search engines for stock news

@@ -15,7 +15,9 @@ Covers the operational contract agreed for the 429/503 incident:
   ProviderUnavailableError translated to _AllModelsFailedError
 """
 import json
+import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -821,6 +823,94 @@ class TestAnalyzerLlmCacheIntegration:
             self._run(analyzer, result=result, calls=calls, persisted=persisted)
 
         assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# backward compatibility: Gemini-only setups must stay a no-op
+# ---------------------------------------------------------------------------
+
+class TestGeminiOnlyStaysUnchanged:
+    """The most important safety property for this feature.
+
+    The reference deployment configures ``GEMINI_API_KEY`` only. Adding the
+    three-tier chain must not append models, tiers or probes that were not
+    asked for -- otherwise the change silently alters a working setup.
+    """
+
+    @staticmethod
+    def _load_config(env_overrides):
+        """Load ``src.config`` in a fresh interpreter with a controlled env."""
+        import subprocess
+
+        repo_root = Path(__file__).resolve().parents[1]
+        program = (
+            "import json, os, sys, tempfile, pathlib\n"
+            "tmp = pathlib.Path(tempfile.mkdtemp(prefix='gemionly_'))\n"
+            "os.environ['REPORTS_DIR'] = str(tmp / 'reports')\n"
+            "from src.config import Config\n"
+            "cfg = Config.get_instance()\n"
+            "from src.llm.provider_chain import build_precheck_targets\n"
+            "print('@@' + json.dumps({\n"
+            "    'fallback': [str(m) for m in (getattr(cfg, 'litellm_fallback_models', []) or [])],\n"
+            "    'tiers': [str(t) for t in (getattr(cfg, 'llm_provider_tiers', []) or [])],\n"
+            "    'zhipu_keys': list(getattr(cfg, 'zhipu_api_keys', []) or []),\n"
+            "    'openrouter_keys': list(getattr(cfg, 'openrouter_api_keys', []) or []),\n"
+            "    'model': str(getattr(cfg, 'litellm_model', '')),\n"
+            "    'targets': [t[0] for t in build_precheck_targets(\n"
+            "        [str(getattr(cfg, 'litellm_model', ''))] + [str(m) for m in (getattr(cfg, 'litellm_fallback_models', []) or [])])],\n"
+            "}, ensure_ascii=False))\n"
+        )
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(
+                ("GEMINI_", "ZHIPU_", "OPENROUTER_", "LITELLM_", "LLM_ZHIPU", "LLM_OPENROUTER", "REPORTS_DIR")
+            )
+        }
+        env.update(env_overrides)
+        proc = subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=180,
+        )
+        assert proc.returncode == 0, f"config bootstrap failed:\n{proc.stdout}\n{proc.stderr}"
+        payload = [line for line in proc.stdout.splitlines() if line.startswith("@@")]
+        assert payload, f"no payload emitted:\n{proc.stdout}\n{proc.stderr}"
+        return json.loads(payload[-1][2:])
+
+    def test_gemini_only_appends_nothing(self):
+        data = self._load_config({"GEMINI_API_KEY": "sk-gemini-testkey-1234567890"})
+
+        assert data["zhipu_keys"] == []
+        assert data["openrouter_keys"] == []
+        assert data["tiers"] == ["gemini"]
+        # 未配置第 2/3 层的 Key 时，不得凭空追加模型…
+        assert not [m for m in data["fallback"] if "zhipu" in m]
+        assert not [m for m in data["fallback"] if m.startswith("openrouter/")]
+        # …也不得让预检去打一个没有凭据的层。
+        assert data["targets"] == ["gemini"]
+
+    def test_three_keys_assemble_full_chain(self):
+        data = self._load_config({
+            "GEMINI_API_KEY": "sk-gemini-testkey-1234567890",
+            "ZHIPU_API_KEYS": "zhipu-testkey-1234567890",
+            "OPENROUTER_API_KEYS": "sk-or-testkey-1234567890",
+        })
+
+        assert data["tiers"] == ["gemini", "zhipu", "openrouter"]
+        assert any("zhipu" in m for m in data["fallback"])
+        assert any(m.startswith("openrouter/") for m in data["fallback"])
+        assert data["targets"][:3] == ["gemini", "zhipu", "openrouter"]
+
+    def test_explicit_fallback_list_is_authoritative(self):
+        data = self._load_config({
+            "GEMINI_API_KEY": "sk-gemini-testkey-1234567890",
+            "ZHIPU_API_KEYS": "zhipu-testkey-1234567890",
+            "OPENROUTER_API_KEYS": "sk-or-testkey-1234567890",
+            "LITELLM_FALLBACK_MODELS": "openai/gpt-4o-mini",
+        })
+
+        # 显式指定备选模型时，自动推导的链不得覆盖它。
+        assert data["fallback"] == ["openai/gpt-4o-mini"]
 
 
 def _today():
