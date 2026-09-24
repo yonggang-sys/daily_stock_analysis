@@ -48,7 +48,7 @@ tavily-python>=0.3.0        # Tavily Search API
 google-search-results>=2.4.0  # SerpAPI
 
 # Network requests
-requests>=2.31.0            # HTTP requests
+requests>=2.31.0            # HTTP requests; also used by DirectNewsSearchProvider (零 Key 直连新闻源：东财/同花顺/财联社/新浪)
 markdown2>=2.4.0            # Markdown to HTML
 imgkit>=1.2.0              # Markdown to image; requires wkhtmltopdf
 fake-useragent>=1.4.0       # Random User-Agent support
