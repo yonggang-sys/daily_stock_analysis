@@ -403,6 +403,7 @@ class SearchServiceConcurrencyTestCase(unittest.TestCase):
                 "searxng_public_instances_enabled": False,
                 "news_max_age_days": 3,
                 "news_strategy_profile": "short",
+                "direct_news_enabled": False,
             },
             topic="影视传媒",
             max_results=2,

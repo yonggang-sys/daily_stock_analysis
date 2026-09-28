@@ -2847,6 +2847,7 @@ class SearchService:
         searxng_timeout_seconds: Optional[int] = None,
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
+        direct_news_enabled: bool = True,
     ):
         """
         初始化搜索服务
@@ -2862,6 +2863,7 @@ class SearchService:
             searxng_public_instances_enabled: 未配置自建实例时，是否自动使用公共 SearXNG 实例
             news_max_age_days: 新闻最大时效（天）
             news_strategy_profile: 新闻窗口策略档位（ultra_short/short/medium/long）
+            direct_news_enabled: 是否启用零 Key 直连新闻源 DirectNews（默认 True；单测可置 False 验证无 provider 退化路径）
         """
         self._constructor_kwargs: Dict[str, Any] = {
             "bocha_keys": list(bocha_keys or []),
@@ -2875,8 +2877,10 @@ class SearchService:
             "searxng_timeout_seconds": searxng_timeout_seconds,
             "news_max_age_days": int(news_max_age_days),
             "news_strategy_profile": news_strategy_profile,
+            "direct_news_enabled": direct_news_enabled,
         }
         self._providers: List[BaseSearchProvider] = []
+        self.direct_news_enabled = direct_news_enabled
         self.news_max_age_days = max(1, news_max_age_days)
         raw_profile = (news_strategy_profile or "short").strip().lower()
         self.news_strategy_profile = normalize_news_strategy_profile(news_strategy_profile)
@@ -2940,7 +2944,8 @@ class SearchService:
 
         # 0. DirectNews（零 Key 直连源，最高优先级，置于链最前、优先于 Anspire）
         #    NEWS_DIRECT_ENABLED=false 时禁用；不依赖任何 API Key。
-        if os.getenv("NEWS_DIRECT_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"):
+        #    direct_news_enabled=False 时整体关闭（单测无 provider 退化路径用）。
+        if direct_news_enabled and os.getenv("NEWS_DIRECT_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"):
             self._providers.insert(0, DirectNewsSearchProvider())
             logger.info("已启用 DirectNews 零 Key 直连新闻源（东财/同花顺/财联社/新浪 并行竞速）")
 
