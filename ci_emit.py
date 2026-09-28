@@ -149,53 +149,37 @@ EM_FLOW = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=30
 # 东财 push2 有多组等价主机（push2 / 1.push2 / 2.push2 / push2delay）。
 # GitHub Runner 单 IP 高频访问会被限流（RemoteDisconnected/502/静默空响应），
 # clist 类请求依次换主机重试可绕开（run 116 实证：clist 静默空 → 热点 0 条）。
-# push2delay 已知最稳定（CDN 回源），移到首位避免不必要的 push2 超时等待。
-EM_PUSH2_HOSTS = ["push2delay.eastmoney.com", "push2.eastmoney.com",
-                  "1.push2.eastmoney.com", "2.push2.eastmoney.com"]
+EM_PUSH2_HOSTS = ["push2.eastmoney.com", "1.push2.eastmoney.com",
+                  "2.push2.eastmoney.com", "push2delay.eastmoney.com"]
 # push2his 同样有多组等价主机，资金流接口限流时换主机重试。
-EM_PUSH2HIS_HOSTS = ["push2delay.eastmoney.com", "push2his.eastmoney.com",
-                     "1.push2his.eastmoney.com", "2.push2his.eastmoney.com"]
+EM_PUSH2HIS_HOSTS = ["push2his.eastmoney.com", "1.push2his.eastmoney.com",
+                     "2.push2his.eastmoney.com", "push2delay.eastmoney.com"]
 
 
 def em_clist_items(url):
-    """东财 clist 多主机并行竞速。url 为完整 URL（首主机），其余主机仅替换域名。
-    同时向所有主机发起请求，取最先返回非空 diff 的结果。
-    返回 diff dict；全部失败/空数据返回 {}（每步打 warn，便于日志定位）。
-    优化（Phase 2）：原串行回退每主机超时 20s × 4 = 最差 80s/请求 → 并行竞速后 ≤ 8s/请求。"""
+    """东财 clist 多主机重试。url 为完整 URL（首主机），其余主机仅替换域名再试。
+    返回 diff dict；全部失败/空数据返回 {}（每步打 warn，便于日志定位）。"""
     from urllib.parse import urlsplit, urlunsplit
     sp = urlsplit(url)
-    # 构造所有主机的 URL 列表
-    host_urls = [url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
-                 for i, host in enumerate(EM_PUSH2_HOSTS)]
-
-    def _try_host(host_idx):
-        host = EM_PUSH2_HOSTS[host_idx]
-        u = host_urls[host_idx]
+    for i, host in enumerate(EM_PUSH2_HOSTS):
         try:
-            txt, ok = http_get(u, timeout=8)
+            u = url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
+            txt, ok = http_get(u, timeout=20)
             if not ok:
-                return host, None, "http_get 失败（超时/连接重置）"
+                print(f"[warn] clist {host}: http_get 失败（超时/连接重置）")
+                continue
             j = json.loads(txt).get("data") or {}
             diff = j.get("diff") or {}
             if not isinstance(diff, dict):
                 diff = {}
             if not diff:
-                return host, None, "data.diff 为空（疑似限流空响应）"
-            return host, diff, None
+                print(f"[warn] clist {host}: data.diff 为空（疑似限流空响应）")
+                continue
+            if i > 0:
+                print(f"[info] clist 主机 fallback 生效: {host}（{len(diff)} 条）")
+            return diff
         except Exception as e:
-            return host, None, f"{type(e).__name__}: {e}"
-
-    # 并行竞速：同时请求所有主机，取最先成功的
-    with ThreadPoolExecutor(max_workers=len(EM_PUSH2_HOSTS)) as pool:
-        futures = {pool.submit(_try_host, i): i for i in range(len(EM_PUSH2_HOSTS))}
-        for future in as_completed(futures, timeout=12):
-            host, diff, err = future.result()
-            if diff is not None:
-                if futures[future] > 0:
-                    print(f"[info] clist 并行竞速命中: {host}（{len(diff)} 条）")
-                return diff
-            else:
-                print(f"[warn] clist {host}: {err}")
+            print(f"[warn] clist {host}: {type(e).__name__}: {e}")
     return {}
 
 
@@ -356,49 +340,40 @@ def fetch_board_members(bk_code):
 
 
 def fetch_em_fundflow(code):
-    """东财个股主力资金流（日级）-> {1d,3d,5d,10d,20d} 主力净流入(元)。push2his 多主机并行竞速。
-    优化（Phase 2）：原串行回退每主机超时 20s × 4 = 最差 80s/股 → 并行竞速后 ≤ 8s/股。"""
+    """东财个股主力资金流（日级）-> {1d,3d,5d,10d,20d} 主力净流入(元)。push2his 多主机重试。"""
     from urllib.parse import urlsplit, urlunsplit
     sec = em_secid(code)
     base_url = EM_FLOW.format(secid=sec)
     sp = urlsplit(base_url)
-    # 构造所有主机的 URL 列表
-    host_urls = [base_url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
-                 for i, host in enumerate(EM_PUSH2HIS_HOSTS)]
-
-    def _try_host(host_idx):
-        host = EM_PUSH2HIS_HOSTS[host_idx]
-        u = host_urls[host_idx]
+    txt, ok = "", False
+    for i, host in enumerate(EM_PUSH2HIS_HOSTS):
+        u = base_url if i == 0 else urlunsplit(("https", host, sp.path, sp.query, ""))
         # curl 优先（push2his 对 urllib 有时静默断连）
-        txt, ok = http_get(u, timeout=8, use_curl=True)
+        txt, ok = http_get(u, timeout=20, use_curl=True)
         if not ok:
             # 回退 urllib
-            txt, ok = http_get(u, timeout=8, use_curl=False)
+            txt, ok = http_get(u, timeout=20, use_curl=False)
         if not ok:
-            return host, None, None, "http_get 失败（超时/连接重置）"
+            print(f"[warn] fundflow {code} host {host}: http_get 失败（超时/连接重置）")
+            continue
+        # 校验返回数据非空（限流时空响应）
         try:
             j_test = json.loads(txt)
             klines = (j_test.get("data") or {}).get("klines") or []
             if klines:
-                return host, txt, klines, None
-            else:
-                return host, None, None, "klines 为空（疑似限流）"
-        except Exception:
-            return host, None, None, "JSON 解析失败"
-
-    # 并行竞速：同时请求所有主机，取最先返回有效数据的
-    with ThreadPoolExecutor(max_workers=len(EM_PUSH2HIS_HOSTS)) as pool:
-        futures = {pool.submit(_try_host, i): i for i in range(len(EM_PUSH2HIS_HOSTS))}
-        for future in as_completed(futures, timeout=12):
-            host, txt, klines, err = future.result()
-            if klines is not None:
-                if futures[future] > 0:
-                    print(f"[info] fundflow {code} 并行竞速命中: {host}（{len(klines)} 条）")
+                if i > 0:
+                    print(f"[info] fundflow {code} 主机 fallback 生效: {host}（{len(klines)} 条）")
                 break
             else:
-                print(f"[warn] fundflow {code} host {host}: {err}")
-        else:
-            return None
+                print(f"[warn] fundflow {code} host {host}: klines 为空（疑似限流）")
+                txt, ok = "", False
+                continue
+        except Exception:
+            print(f"[warn] fundflow {code} host {host}: JSON 解析失败")
+            txt, ok = "", False
+            continue
+    if not ok:
+        return None
     try:
         klines = (json.loads(txt).get("data") or {}).get("klines") or []
         # 每行: 日期,主力净流入(f52),主力净占比,...
@@ -627,28 +602,27 @@ def build_reco_json(ws):
     low_pb = sorted([r for r in cands if r["pe"] and r["pe"] > 0 and r["pe"] < 50 and r["pullback"] and not r["hot"]], key=lambda x: x["score"], reverse=True)
     hot_hi = sorted([r for r in cands if r["hot"] and not (r["pe"] and r["pe"] > 0 and r["pe"] < 50)], key=lambda x: x["score"], reverse=True)
 
+    # ===== DSA 原始结果直推（去除四条件 quad_ok 筛选门槛）=====
+    # ci_emit 仅负责把 DSA 主流程产出的原始候选（_candA..D.md / _candU.md）原样推送
+    # 至仪表盘，不再以 quad_ok 四条件（基本面/低估值/阶段热点/回踩）作为入池门槛。
+    # quad_ok / fund_ok / val_ok 仍作为参考标记保留在每条记录上，供仪表盘标注。
+    all_sorted = sorted(cands, key=lambda x: (x.get("score") or 0), reverse=True)
     groups = []
+    # 1) 原始候选全量（核心：未加四条件筛选，直接推送 daily_stock_analysis 原始结果）
+    groups.append({
+        "group": "📊 DSA 原始候选（全量·未加四条件筛选）",
+        "board_name": None, "cat": "raw", "hot": None, "heat_rank": None, "sector_chg": None,
+        "tag": "直接推送 daily_stock_analysis 原始选股结果，未叠加 ci_emit 四条件门槛；quad_ok 仅作参考标注",
+        "items": all_sorted,
+    })
+    # 2) 四条件全中（仅供参考，非入池门槛）
     if quad:
-        groups.append({"group": "✅ 四重符合（基本面良好×低估值×阶段热点×回踩调整）", "board_name": None, "cat": "quad",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "四条件全中·最优选区（优先关注）", "items": quad[:8]})
-    else:
-        groups.append({"group": "✅ 四重符合（基本面良好×低估值×阶段热点×回踩调整）", "board_name": None, "cat": "quad",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "当前市场无四条件全中标的（见下方分层/行业细分）", "items": []})
-    if triple:
-        groups.append({"group": "✅ 三重符合（低估值×阶段热点×回踩调整）", "board_name": None, "cat": "triple",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "三重符合·回踩买点区（优先关注）", "items": triple[:6]})
-    else:
-        groups.append({"group": "✅ 三重符合（低估值×阶段热点×回踩调整）", "board_name": None, "cat": "triple",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "当前市场无完全符合三重条件的标的（见下方分层）", "items": []})
-    if low_hot:
-        groups.append({"group": "⚠️ 估值偏低×热点（未回踩·需回踩方能入池）", "board_name": None, "cat": "lowhot",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "估值偏低(PE<50)+热点，但未回踩，不满足入池条件，等回踩确认后再介入", "items": low_hot[:4]})
-    if low_pb:
-        groups.append({"group": "低估值×回踩（非当前热点）", "board_name": None, "cat": "lowpb",
-                       "hot": False, "heat_rank": None, "sector_chg": None, "tag": "低估值+回踩，但不在热点行业，弹性与资金关注较弱", "items": low_pb[:4]})
-    if hot_hi:
-        groups.append({"group": "仅热点（估值偏高·仅参考）", "board_name": None, "cat": "hothi",
-                       "hot": True, "heat_rank": None, "sector_chg": None, "tag": "热点但PE≥50，非低估值优选(低估值要求PE<50且回踩)，仅作参考", "items": hot_hi[:4]})
+        groups.append({
+            "group": "✅ 四条件全中（仅供参考·非入池门槛）",
+            "board_name": None, "cat": "quad", "hot": True, "heat_rank": None, "sector_chg": None,
+            "tag": "同时满足 基本面良好×低估值×阶段热点×回踩调整（原四重符合口径），现仅作标注，不再作为筛选门槛",
+            "items": quad,
+        })
 
     _seen_sec = {}
     for r in cands:
