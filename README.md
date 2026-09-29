@@ -88,8 +88,32 @@
 | `ANTHROPIC_API_KEY` | Anthropic Claude API Key | 可选 |
 | `OPENAI_API_KEY` | OpenAI 兼容 API Key（支持 DeepSeek、通义千问等） | 可选 |
 | `OPENAI_BASE_URL` / `OPENAI_MODEL` | 使用 OpenAI 兼容服务时填写 | 可选 |
+| `ZHIPU_API_KEYS` | 智谱 GLM API Key（**第 2 级降级**，逗号分隔多 Key 轮换） | 可选 |
+| `OPENROUTER_API_KEYS` | OpenRouter API Key（**第 3 级兜底**，免费额度极少，见下方额度保护） | 可选 |
 
 > Ollama 更适合本地 / Docker 部署，GitHub Actions 推荐使用云端 API。
+
+**三级模型降级与 OpenRouter 额度保护**
+
+只配置一个模型服务商时，一旦触发 429 配额耗尽或 503 过载，整批股票会一起失败。本项目按「Gemini → GLM/智谱 → OpenRouter」三级降级，并按错误类型决定是否降级：
+
+| 错误类型 | 处理方式 |
+|---|---|
+| 503 / 超时 / 单次 429（无 quota 字样） | **原地重试**（默认 2 次，指数退避，尊重 `Retry-After`），不消耗 OpenRouter |
+| 429 quota exceeded / 402 余额不足 | **立即降级**到下一级 |
+| 401 / 403 / invalid api key | 标记该 Provider 不可用，**立即降级**，本次运行内不再尝试 |
+| 400 参数错误 | 不重试，直接抛出（由上层规则引擎兜底） |
+
+OpenRouter 免费额度默认仅 50 次/天，因此**只有前两级都失败后才会被调用**：
+
+- 每日额度账本落盘 `reports/openrouter_quota.json`，并在 `reports/latest.meta.json` 的 `openrouter_usage` 字段留镜像（该文件在 workflow 提交范围内，额度可跨运行保留）；
+- `count >= OPENROUTER_QUOTA_RESERVE_AFTER`（默认 45）后，只对「配额耗尽」类失败放行，其余保留 5 次应急；
+- `count >= OPENROUTER_QUOTA_DAILY_LIMIT`（默认 50）后直接跳过并记 ERROR；
+- 每次成功调用后打印 `[OpenRouter] 今日已用 X/50 次（前两层均失败才触发）`。
+
+相关开关：`LLM_FALLBACK_CHAIN_ENABLED`（总开关）、`LLM_FALLBACK_MAX_IN_PLACE_RETRIES`、`LLM_FALLBACK_BACKOFF_BASE_SECONDS` / `_MAX_SECONDS`、`OPENROUTER_QUOTA_GUARD_ENABLED`、`OPENROUTER_QUOTA_DAILY_LIMIT`、`OPENROUTER_QUOTA_RESERVE_AFTER`。
+
+此外还提供：Provider 令牌桶限流（`LLM_PROVIDER_RATE_LIMIT_ENABLED` / `LLM_PROVIDER_RPM_GEMINI|ZHIPU|OPENROUTER`，GitHub Actions 下 Gemini 自动减半）、强制 JSON 输出（`LLM_JSON_OUTPUT_MODE`）、LLM 结果缓存（`LLM_CACHE_ENABLED` / `LLM_CACHE_TTL_SECONDS`，24h TTL，命中标记 `data_source=llm_cache`）、启动期 Provider 健康预检（`LLM_PROVIDER_PRECHECK_ENABLED`，任一 Key 不可用会提前打日志）。完整变量说明见 [LLM 配置指南](docs/LLM_CONFIG_GUIDE.md) 与 Web「系统设置」页。
 
 **通知渠道配置（至少配置一个）**
 

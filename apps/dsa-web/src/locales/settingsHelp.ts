@@ -145,6 +145,282 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响默认模型问股、策略选择和相关工具调用；不影响 Codex 本地 Agent。'],
     notes: ['请确认该模型存在于已启用渠道、YAML 路由或 legacy provider key 可达范围内。'],
   },
+  'settings.ai_model.ZHIPU_API_KEYS': {
+    title: '智谱（GLM）API Key',
+    summary: '第二级备用 Provider 的密钥，主模型（Gemini）配额耗尽或不可用时接管分析。',
+    usage: '多个 Key 使用英文逗号分隔以轮换；也可使用单数变量 ZHIPU_API_KEY，或别名 LLM_ZHIPU_API_KEYS。',
+    valueNotes: [
+      '留空表示不启用 GLM 这一级，失败时直接跳到下一级 Provider。',
+      'Key 只在服务端读取，不会回显到 Web 页面。',
+    ],
+    impact: [
+      '影响主 Provider 失败后能否用 GLM 继续完成分析，以及跨 Provider 的成本。',
+    ],
+    notes: [
+      '若同时配置了 LITELLM_FALLBACK_MODELS，该显式列表优先，不再自动追加 GLM/OpenRouter。',
+    ],
+  },
+  'settings.ai_model.OPENROUTER_API_KEYS': {
+    title: 'OpenRouter API Key',
+    summary: '最后一级备用 Provider 的密钥，仅在 Gemini 与 GLM 都失败后才被调用。',
+    usage: '多个 Key 使用英文逗号分隔；也可使用单数变量 OPENROUTER_API_KEY。',
+    valueNotes: [
+      'OpenRouter 免费额度极少（默认 50 次/天），因此该级受额度保护。',
+      '单次 503/超时只在原地重试，不会直接消耗 OpenRouter 额度。',
+    ],
+    impact: [
+      '决定前两级全部失败时能否继续产出 AI 分析；额度耗尽后自动跳过。',
+    ],
+    notes: [
+      '额度计数落盘在 reports/openrouter_quota.json，并在 reports/latest.meta.json 的 openrouter_usage 字段留镜像。',
+    ],
+  },
+  'settings.ai_model.LLM_ZHIPU_MODELS': {
+    title: 'GLM 模型列表',
+    summary: '第二级备用 Provider 使用的 GLM 模型，按顺序尝试。',
+    usage: '多个模型使用英文逗号分隔；留空时使用 ZHIPU_MODEL。',
+    valueNotes: [
+      '模型名需带 LiteLLM provider 前缀 zhipuai/，例如 zhipuai/glm-4.6。',
+    ],
+    impact: [
+      '影响 GLM 这一级的模型选择与响应质量。',
+    ],
+    notes: [
+      '默认值为 zhipuai/glm-4.6。',
+    ],
+  },
+  'settings.ai_model.LLM_OPENROUTER_MODELS': {
+    title: 'OpenRouter 模型列表',
+    summary: '最后一级备用 Provider 使用的模型，按顺序尝试。',
+    usage: '多个模型使用英文逗号分隔；留空时使用 OPENROUTER_MODEL。',
+    valueNotes: [
+      '模型名需带 openrouter/ 前缀；OpenRouter 的模型 id 常含二级斜杠，属正常写法。',
+    ],
+    impact: [
+      '影响兜底模型的成本与免费额度消耗速度。',
+    ],
+    notes: [
+      '建议优先选用标注 :free 的免费模型以节省额度。',
+    ],
+  },
+  'settings.ai_model.LLM_FALLBACK_CHAIN_ENABLED': {
+    title: '三级降级总开关',
+    summary: '启用按错误类型决策的 Provider 降级链（Gemini → GLM → OpenRouter）。',
+    usage: 'true 启用（默认）；false 退回「任一失败即换下一个模型」的旧行为。',
+    valueNotes: [
+      '启用后：503/超时先原地重试，配额耗尽或鉴权失败才降级。',
+      '关闭后会失去 OpenRouter 额度保护，不建议与稀缺额度同时使用。',
+    ],
+    impact: [
+      '影响失败场景下的重试策略、降级顺序与第三方额度消耗。',
+    ],
+    notes: [
+      '该开关只影响分析链路的降级决策，不改变模型本身的可用性。',
+    ],
+  },
+  'settings.ai_model.LLM_FALLBACK_MAX_IN_PLACE_RETRIES': {
+    title: '原地重试次数',
+    summary: '瞬时故障（503/超时/单次 429）在同一 Provider 上重试的次数上限。',
+    usage: '填写整数，0 表示不重试、直接降级。默认 2。',
+    valueNotes: [
+      '重试采用指数退避，并尊重响应头 Retry-After。',
+      '该重试不消耗 OpenRouter 额度。',
+    ],
+    impact: [
+      '影响瞬时故障的自愈能力与整体分析耗时。',
+    ],
+    notes: [
+      '配额耗尽（quota exceeded）与鉴权失败不在此重试范围内，会立即降级。',
+    ],
+  },
+  'settings.ai_model.LLM_FALLBACK_BACKOFF_BASE_SECONDS': {
+    title: '重试退避基数（秒）',
+    summary: '原地重试的指数退避基数，第 1 次退避等于该值，第 2 次为其两倍。',
+    usage: '填写秒数，可带小数。默认 1。',
+    valueNotes: [
+      '若响应头带 Retry-After，实际等待时间取两者较大值。',
+    ],
+    impact: [
+      '影响重试的等待节奏与总耗时。',
+    ],
+    notes: [
+      '退避上限由 LLM_FALLBACK_BACKOFF_MAX_SECONDS 控制。',
+    ],
+  },
+  'settings.ai_model.LLM_FALLBACK_BACKOFF_MAX_SECONDS': {
+    title: '重试退避上限（秒）',
+    summary: '单次原地重试等待时间的上限，避免一次重试阻塞整个分析任务。',
+    usage: '填写秒数，默认 30。',
+    valueNotes: [
+      '即使 Retry-After 要求更久，也会被该值截断。',
+    ],
+    impact: [
+      '影响单只股票分析的最坏耗时。',
+    ],
+    notes: [
+      '批量分析场景下建议不要设置为很大的值。',
+    ],
+  },
+  'settings.ai_model.LLM_JSON_OUTPUT_MODE': {
+    title: 'JSON 输出模式',
+    summary: '强制 Provider 返回结构化 JSON，减少解析失败与补全重试。',
+    usage: 'auto（默认）仅在需要 JSON 校验的调用上附加；on 始终附加；off 关闭。',
+    valueNotes: [
+      'Gemini 使用 response_mime_type=application/json，GLM/OpenRouter 使用 response_format=json_object。',
+      '若 Provider 明确拒绝这些参数，会自动去掉参数重试一次。',
+    ],
+    impact: [
+      '影响 JSON 解析成功率与一次补全重试的概率。',
+    ],
+    notes: [
+      '关闭后模型可能返回带解释文字的输出，需要更宽松的解析。',
+    ],
+  },
+  'settings.ai_model.OPENROUTER_QUOTA_GUARD_ENABLED': {
+    title: 'OpenRouter 额度保护',
+    summary: '启用每日额度账本，只有在 Gemini 与 GLM 都失败后才允许调用 OpenRouter。',
+    usage: 'true 启用（默认）；false 关闭保护，降级到该级即调用。',
+    valueNotes: [
+      '单次 503/超时不会触发 OpenRouter，只有配额耗尽、鉴权失败或重试耗尽才会。',
+      '额度记录每日按 UTC 零点重置。',
+    ],
+    impact: [
+      '直接影响 OpenRouter 免费额度能否撑满一天。',
+    ],
+    notes: [
+      '关闭保护可能导致额度在早盘就被耗尽。',
+    ],
+  },
+  'settings.ai_model.OPENROUTER_QUOTA_DAILY_LIMIT': {
+    title: 'OpenRouter 每日额度',
+    summary: 'OpenRouter 每天允许的最大调用次数。',
+    usage: '填写整数，默认 50（免费额度）。',
+    valueNotes: [
+      '付费账户可按实际额度上调。',
+    ],
+    impact: [
+      '决定降级到 OpenRouter 时能覆盖多少只股票。',
+    ],
+    notes: [
+      '达到额度后该级会被直接跳过并记录 ERROR 日志。',
+    ],
+  },
+  'settings.ai_model.OPENROUTER_QUOTA_RESERVE_AFTER': {
+    title: 'OpenRouter 保留阈值',
+    summary: '当日调用数达到该值后，只对「配额耗尽」类失败放行，其余情况保留额度应急。',
+    usage: '填写整数，默认 45（相当于保留 5 次应急）。',
+    valueNotes: [
+      '该值应小于 OPENROUTER_QUOTA_DAILY_LIMIT。',
+    ],
+    impact: [
+      '影响额度尾段的可用性与应急能力。',
+    ],
+    notes: [
+      '若额度本身很小，可下调该值。',
+    ],
+  },
+  'settings.ai_model.LLM_PROVIDER_RATE_LIMIT_ENABLED': {
+    title: 'Provider 令牌桶限流',
+    summary: '按 Provider 限制每分钟请求数，从源头减少 429 配额报错。',
+    usage: 'true 启用（默认）；false 关闭后完全依赖 Provider 侧限流。',
+    valueNotes: [
+      'GitHub Actions 环境下 Gemini 的 RPM 会自动减半。',
+      '并发分析多只股票时，限流会让请求排队而不是一起撞配额。',
+    ],
+    impact: [
+      '影响并发分析的吞吐量与 429 出现概率。',
+    ],
+    notes: [
+      '关闭后高并发场景更容易触发配额耗尽。',
+    ],
+  },
+  'settings.ai_model.LLM_PROVIDER_RPM_GEMINI': {
+    title: 'Gemini 每分钟请求数',
+    summary: 'Gemini 这一级的令牌桶速率上限。',
+    usage: '填写整数，默认 10；GitHub Actions 下默认减半为 5。',
+    valueNotes: [
+      '免费 Key 的实际配额较低，下调可减少 429。',
+    ],
+    impact: [
+      '影响 Gemini 的可用吞吐与失败率。',
+    ],
+    notes: [
+      '该值应不高于账户实际的 RPM 配额。',
+    ],
+  },
+  'settings.ai_model.LLM_PROVIDER_RPM_ZHIPU': {
+    title: 'GLM 每分钟请求数',
+    summary: 'GLM / 智谱这一级的令牌桶速率上限。',
+    usage: '填写整数，默认 60。',
+    valueNotes: [
+      'GLM 的配额通常比免费 Gemini 宽松，因此默认值更高。',
+    ],
+    impact: [
+      '影响降级到 GLM 后能消化的并发量。',
+    ],
+    notes: [
+      '请按实际套餐额度调整。',
+    ],
+  },
+  'settings.ai_model.LLM_PROVIDER_RPM_OPENROUTER': {
+    title: 'OpenRouter 每分钟请求数',
+    summary: 'OpenRouter 这一级的令牌桶速率上限，默认刻意压低以保护额度。',
+    usage: '填写整数，默认 5。',
+    valueNotes: [
+      '该值对免费额度几乎没有影响，主要防止短时突发。',
+    ],
+    impact: [
+      '影响兜底阶段的请求节奏。',
+    ],
+    notes: [
+      '真正的额度控制由每日额度账本负责。',
+    ],
+  },
+  'settings.ai_model.LLM_CACHE_ENABLED': {
+    title: 'LLM 结果缓存',
+    summary: '同一交易日内复用已完成的 LLM 分析结果，减少重复调用与配额消耗。',
+    usage: 'true 启用（默认）；false 关闭后每次都真实调用模型。',
+    valueNotes: [
+      '缓存键为 sha256(股票代码 + 交易日 + prompt 哈希)，默认 TTL 24 小时。',
+      '命中的结果会标记 data_source=llm_cache，便于审计。',
+    ],
+    impact: [
+      '显著减少重跑与重复分析时的模型调用量。',
+    ],
+    notes: [
+      '缓存存放在工作区数据目录（可用 LLM_CACHE_PATH 指定），不写入仓库提交范围。',
+    ],
+  },
+  'settings.ai_model.LLM_CACHE_TTL_SECONDS': {
+    title: 'LLM 缓存有效期（秒）',
+    summary: '缓存结果的存活时间，超过后按未命中处理。',
+    usage: '填写秒数，默认 86400（24 小时）。',
+    valueNotes: [
+      '盘中反复重跑时，过长或过短都会影响时效性与调用量。',
+    ],
+    impact: [
+      '影响分析结果的时效性与模型调用次数。',
+    ],
+    notes: [
+      '0 表示缓存立即过期，等价于关闭缓存。',
+    ],
+  },
+  'settings.ai_model.LLM_PROVIDER_PRECHECK_ENABLED': {
+    title: 'Provider 健康预检',
+    summary: '启动时对每个已配置的 Provider 发一次最小请求，提前发现不可用 Key。',
+    usage: 'true 启用（默认）；false 关闭后直接进入正式分析。',
+    valueNotes: [
+      '单次预检有超时上限（默认 10 秒），失败不会中断任务。',
+      '只有鉴权类失败会被判定为不可用，网络抖动不会误杀 Provider。',
+      '预检若命中 OpenRouter，也会计入其每日额度。',
+    ],
+    impact: [
+      '提前暴露无效 Key，避免 16 只股票全部失败后才发现问题。',
+    ],
+    notes: [
+      '全部 Provider 都不可用时会抛错并交由规则引擎兜底。',
+    ],
+  },
   'settings.ai_model.LITELLM_FALLBACK_MODELS': {
     title: '备用模型',
     summary: '主模型失败时按顺序尝试的备用模型列表。',

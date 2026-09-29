@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import re
+import sys
 import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple, Callable, Union
@@ -79,6 +80,40 @@ from src.llm.provider_cache import (
     filter_prompt_cache_telemetry,
 )
 from src.llm.response_content import strip_leading_think_wrapper
+from src.llm.provider_error import (
+    LLMErrorType,
+    ProviderUnavailableError,
+    classify_llm_error,
+    fallback_reason_label,
+    transient_retry_eligible,
+)
+from src.llm.provider_chain import (
+    FallbackDecision,
+    FallbackOutcome,
+    ProviderFallbackPolicy,
+    apply_json_output_kwargs,
+    build_fallback_policy,
+    build_precheck_targets,
+    decide_fallback,
+    format_fallback_log,
+    is_protected_tier,
+    precheck_providers,
+    resolve_provider_tier,
+    tier_display_name,
+)
+from src.llm.openrouter_quota import (
+    OpenRouterQuotaLedger,
+    create_openrouter_quota_ledger,
+)
+from src.llm.provider_rate_limit import (
+    ProviderRateLimiter,
+    create_provider_rate_limiter,
+)
+from src.llm.llm_result_cache import (
+    LLMResultCache,
+    create_llm_result_cache,
+    hash_prompt,
+)
 from src.storage import persist_llm_usage
 from src.data.stock_mapping import STOCK_NAME_MAP
 from src.report_language import (
@@ -2326,6 +2361,189 @@ class GeminiAnalyzer:
         """Return the runtime config, honoring injected overrides for tests/pipeline."""
         return getattr(self, "_config_override", None) or get_config()
 
+    # ------------------------------------------------------------------
+    # Three-tier fallback collaborators (lazily built, cheap to reuse)
+    # ------------------------------------------------------------------
+
+    def _get_fallback_policy(self, config: Optional[Config] = None) -> ProviderFallbackPolicy:
+        """Return the (cached) fallback policy for the active config."""
+        policy = getattr(self, "_fallback_policy", None)
+        if policy is None:
+            policy = build_fallback_policy(config or self._get_runtime_config())
+            self._fallback_policy = policy
+        return policy
+
+    def _get_provider_rate_limiter(self, config: Optional[Config] = None) -> ProviderRateLimiter:
+        """Return the (cached) per-provider token-bucket limiter."""
+        limiter = getattr(self, "_provider_rate_limiter", None)
+        if limiter is None:
+            limiter = create_provider_rate_limiter(config or self._get_runtime_config())
+            self._provider_rate_limiter = limiter
+        return limiter
+
+    def _get_openrouter_quota_ledger(
+        self, config: Optional[Config] = None
+    ) -> OpenRouterQuotaLedger:
+        """Return the (cached) OpenRouter daily-quota ledger.
+
+        ``reports/openrouter_quota.json`` is *not* inside the workflow's
+        ``git add`` scope, so the ledger mirrors its state into the referenced
+        ``reports/latest.meta.json`` (``openrouter_usage`` field) as well.
+        """
+        ledger = getattr(self, "_openrouter_quota_ledger", None)
+        if ledger is None:
+            ledger = create_openrouter_quota_ledger(config or self._get_runtime_config())
+            self._openrouter_quota_ledger = ledger
+        return ledger
+
+    def _get_llm_result_cache(self, config: Optional[Config] = None) -> LLMResultCache:
+        """Return the (cached) SQLite LLM result cache (TTL guarded)."""
+        cache = getattr(self, "_llm_result_cache", None)
+        if cache is None:
+            cache = create_llm_result_cache(config or self._get_runtime_config())
+            self._llm_result_cache = cache
+        return cache
+
+    @staticmethod
+    def _resolve_llm_cache_trade_date(context: Optional[Dict[str, Any]]) -> str:
+        """Best-effort trade date for cache keying (YYYY-MM-DD)."""
+        ctx = context or {}
+        today = ctx.get("today") if isinstance(ctx.get("today"), dict) else {}
+        for container in (ctx, today or {}):
+            if not isinstance(container, dict):
+                continue
+            for key in ("trade_date", "date"):
+                value = container.get(key)
+                if value:
+                    return str(value)[:10]
+        return time.strftime("%Y-%m-%d")
+
+    def ensure_provider_precheck(self, models: Optional[List[str]] = None) -> Optional[Any]:
+        """Ping each configured tier once per process.
+
+        Failures never abort a run unless *every* configured tier is definitely
+        unusable, in which case :class:`ProviderUnavailableError` is translated
+        into :class:`_AllModelsFailedError` so the existing rule-engine fallback
+        contract is preserved.
+
+        Returns the :class:`PrecheckReport`, or ``None`` when disabled/skipped.
+        """
+        if getattr(self, "_provider_precheck_done", False):
+            return getattr(self, "_provider_precheck_report", None)
+        self._provider_precheck_done = True
+
+        config = self._get_runtime_config()
+        if not getattr(config, "llm_provider_precheck_enabled", True):
+            return None
+        # Never burn real API calls from the test suite: mocks cannot model
+        # provider auth, so every tier would look definitely-unhealthy.
+        if "pytest" in sys.modules:
+            logger.debug("[Provider预检] skipped under pytest")
+            return None
+
+        policy = self._get_fallback_policy(config)
+        targets = list(
+            build_precheck_targets(models or self._precheck_model_candidates(config))
+        )
+        if not targets:
+            return None
+
+        limiter = self._get_provider_rate_limiter(config)
+        ledger = self._get_openrouter_quota_ledger(config)
+
+        def _ping(model: str, timeout: float) -> Any:
+            limiter.acquire(resolve_provider_tier(model))
+            return self._dispatch_litellm_completion(
+                model,
+                {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 8,
+                    "timeout": timeout,
+                },
+                config=config,
+            )
+
+        try:
+            report = precheck_providers(
+                targets,
+                ping=_ping,
+                timeout_seconds=float(
+                    getattr(config, "llm_provider_precheck_timeout_seconds", 10.0)
+                ),
+                health=policy.health,
+                quota_ledger=ledger,
+                logger_=logger,
+            )
+        except ProviderUnavailableError as exc:
+            self._provider_precheck_report = None
+            raise _AllModelsFailedError(
+                f"All configured LLM providers failed health precheck: {exc}",
+                last_response_text=None,
+                last_model=None,
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - precheck must never break a run
+            logger.warning("[Provider预检] skipped: %s", exc)
+            self._provider_precheck_report = None
+            return None
+
+        self._provider_precheck_report = report
+        return report
+
+    def _precheck_model_candidates(self, config: Config) -> List[str]:
+        """Models to health-check: the primary model plus the fallback chain."""
+        candidates = [config.litellm_model] + list(config.litellm_fallback_models or [])
+        return [m for m in candidates if m]
+
+    def _lookup_llm_cache(
+        self,
+        cache: LLMResultCache,
+        *,
+        context: Dict[str, Any],
+        prompt: str,
+        system_prompt: Optional[str],
+    ) -> Optional[Any]:
+        """Return a cached :class:`CacheHit`, or ``None`` on miss/disabled."""
+        if not cache.enabled:
+            return None
+        try:
+            return cache.get(
+                str((context or {}).get("code") or ""),
+                self._resolve_llm_cache_trade_date(context),
+                hash_prompt(prompt, system_prompt),
+            )
+        except Exception as exc:  # noqa: BLE001 - cache must never break analysis
+            logger.debug("[LLM缓存] 查询失败: %s", exc)
+            return None
+
+    def _store_llm_cache(
+        self,
+        cache: LLMResultCache,
+        *,
+        context: Dict[str, Any],
+        prompt: str,
+        system_prompt: Optional[str],
+        response: str,
+        model: str = "",
+        provider: str = "",
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist a successful raw LLM response for the TTL window."""
+        if not cache.enabled or not response:
+            return
+        try:
+            cache.put(
+                str((context or {}).get("code") or ""),
+                self._resolve_llm_cache_trade_date(context),
+                hash_prompt(prompt, system_prompt),
+                response,
+                model=model or "",
+                provider=provider or "",
+                usage=usage,
+            )
+        except Exception as exc:  # noqa: BLE001 - cache must never break analysis
+            logger.debug("[LLM缓存] 写入失败: %s", exc)
+
     def _get_skill_prompt_sections(self) -> tuple[str, str, bool]:
         """Resolve skill instructions + default baseline + prompt mode."""
         skill_instructions = getattr(self, "_skill_instructions_override", None)
@@ -3359,8 +3577,60 @@ class GeminiAnalyzer:
         last_usage: Dict[str, Any] = {}
         effective_system_prompt = system_prompt or self.TEXT_SYSTEM_PROMPT
         router_model_names = set(get_configured_llm_models(config.llm_model_list))
-        for model in models_to_try:
+
+        # === Three-tier fallback orchestration (Gemini -> GLM/Zhipu -> OpenRouter) ===
+        # The chain order comes from config.litellm_fallback_models, but *when* a
+        # tier is left is decided by the error class, so a single 503 retries in
+        # place instead of burning the (tiny) OpenRouter allowance.
+        fallback_policy = self._get_fallback_policy(config)
+        rate_limiter = self._get_provider_rate_limiter(config)
+        quota_ledger = self._get_openrouter_quota_ledger(config)
+        last_error_type: Optional[LLMErrorType] = None
+        in_place_attempts: Dict[str, int] = {}
+        json_expected = response_validator is not None
+        # Models that rejected the JSON-output request parameters; retried once
+        # without them (see FallbackDecision.RETRY_WITHOUT_JSON_MODE).
+        json_suppressed_models: set = set()
+        model_index = 0
+        while model_index < len(models_to_try):
+            model = models_to_try[model_index]
             last_model = model
+            json_mode_active = False
+            # Reset per-model: the stream-quota guard below reads `last_error`,
+            # so a stale value from the previous model would short-circuit the
+            # whole chain (and hide the real failure).
+            last_error = None
+            # Response-validation / empty-response failures must keep the legacy
+            # "try the next model" behaviour instead of being classified: they say
+            # nothing about the provider's health or quota.
+            validator_failed = False
+            empty_response = False
+
+            # --- Tier gate: skip providers known to be unusable ---------------
+            _tier = resolve_provider_tier(model)
+            _skip_reason = fallback_policy.skip_reason_for(_tier)
+            if _skip_reason:
+                logger.warning(
+                    "[Fallback] %s skipped: %s", tier_display_name(_tier), _skip_reason
+                )
+                if last_error_type is None:
+                    last_error_type = LLMErrorType.AUTH_ERROR
+                model_index += 1
+                continue
+
+            # --- OpenRouter budget gate ---------------------------------------
+            # Reached only after the earlier tiers failed with a quota/auth error
+            # or exhausted their in-place retries (see `last_error_type`).
+            if is_protected_tier(_tier) and fallback_policy.protect_openrouter:
+                _quota_decision = quota_ledger.allow(last_error_type)
+                if not _quota_decision.allowed:
+                    logger.error(
+                        "[OpenRouter] 跳过调用：%s", _quota_decision.reason
+                    )
+                    if last_error_type is None:
+                        last_error_type = LLMErrorType.QUOTA_EXHAUSTED
+                    model_index += 1
+                    continue
             origins = route_deployment_origins(config.llm_model_list, model)
             model_stream = bool(stream and not origins.has_hermes)
             recovery_model_list = config.llm_model_list
@@ -3446,6 +3716,22 @@ class GeminiAnalyzer:
                 if hint_result.diagnostics:
                     logger.debug("[PromptCache] %s", hint_result.diagnostics)
 
+                # --- Token-bucket rate limit (per provider tier) --------------
+                _rate_outcome = rate_limiter.acquire(_tier)
+                if not _rate_outcome.allowed:
+                    logger.warning("[RateLimit] %s", _rate_outcome.log_line())
+
+                # --- Enforce provider-native JSON output ----------------------
+                json_mode_active = False
+                if model not in json_suppressed_models:
+                    if apply_json_output_kwargs(
+                        call_kwargs,
+                        model,
+                        mode=fallback_policy.json_output_mode,
+                        json_expected=json_expected,
+                    ):
+                        json_mode_active = True
+
                 _stream_text: Optional[str] = None
                 _stream_usage: Dict[str, Any] = {}
 
@@ -3505,7 +3791,18 @@ class GeminiAnalyzer:
                         _stream_usage.setdefault("provider", usage_provider)
                     last_usage = _stream_usage
                     if response_validator is not None:
-                        response_validator(_stream_text)
+                        try:
+                            response_validator(_stream_text)
+                        except Exception:
+                            validator_failed = True
+                            raise
+                    if is_protected_tier(_tier) and fallback_policy.protect_openrouter:
+                        quota_ledger.record(1)
+                        logger.warning(
+                            "[OpenRouter] 今日已用 %d/%d 次（前两层均失败才触发）",
+                            quota_ledger.count,
+                            quota_ledger.limit,
+                        )
                     return _stream_text, model, _stream_usage
 
                 # Quota check: skip non-stream fallback if stream error was quota/rate-limit/503
@@ -3573,8 +3870,20 @@ class GeminiAnalyzer:
                         last_provider = response_provider
                     last_usage = usage
                     if response_validator is not None:
-                        response_validator(content)
+                        try:
+                            response_validator(content)
+                        except Exception:
+                            validator_failed = True
+                            raise
+                    if is_protected_tier(_tier) and fallback_policy.protect_openrouter:
+                        quota_ledger.record(1)
+                        logger.warning(
+                            "[OpenRouter] 今日已用 %d/%d 次（前两层均失败才触发）",
+                            quota_ledger.count,
+                            quota_ledger.limit,
+                        )
                     return (content, actual_model, usage)
+                empty_response = True
                 raise ValueError("LLM returned empty response")
 
             except Exception as e:
@@ -3591,6 +3900,79 @@ class GeminiAnalyzer:
                 safe_error = self._sanitize_litellm_exception_text(e, config=config, model=model)
                 logger.warning("[LiteLLM] %s failed: %s", model, safe_error)
                 last_error = RuntimeError(f"{type(e).__name__}: {safe_error}")
+
+                # Response-shape failures are provider-agnostic: keep the legacy
+                # behaviour of moving straight to the next model.
+                if validator_failed or empty_response or not fallback_policy.enabled:
+                    model_index += 1
+                    continue
+
+                # --- Error-class-aware fallback decision ----------------------
+                attempt = in_place_attempts.get(model, 0) + 1
+                error_type = classify_llm_error(e)
+                outcome = decide_fallback(
+                    error_type,
+                    retry_policy=fallback_policy.retry_policy,
+                    attempt=attempt,
+                    error=e,
+                    json_mode_active=json_mode_active,
+                )
+                last_error_type = error_type
+
+                if (
+                    outcome.decision is FallbackDecision.RETRY_IN_PLACE
+                    and not transient_retry_eligible(e)
+                ):
+                    # Unknown/opaque failure without an explicit transient signal:
+                    # keep the legacy behaviour and move to the next model rather
+                    # than spending backoff time on it.
+                    outcome = FallbackOutcome(
+                        FallbackDecision.ADVANCE, "no_transient_signal"
+                    )
+
+                if outcome.decision is FallbackDecision.RETRY_IN_PLACE:
+                    in_place_attempts[model] = attempt
+                    delay = fallback_policy.retry_policy.backoff_delay(attempt, error=e)
+                    logger.warning(
+                        "[Fallback] %s in-place retry %d/%d in %.1fs, reason=%s",
+                        model,
+                        attempt,
+                        fallback_policy.retry_policy.max_in_place_retries,
+                        delay,
+                        outcome.reason,
+                    )
+                    if delay > 0:
+                        time.sleep(delay)
+                    continue
+
+                if outcome.decision is FallbackDecision.RETRY_WITHOUT_JSON_MODE:
+                    json_suppressed_models.add(model)
+                    logger.warning(
+                        "[Fallback] %s rejected JSON output params, retrying without them",
+                        model,
+                    )
+                    continue
+
+                if outcome.mark_unhealthy:
+                    fallback_policy.health.mark_unhealthy(_tier, reason=outcome.reason)
+
+                if outcome.decision is FallbackDecision.ABORT:
+                    logger.error(
+                        "[Fallback] %s aborted the chain, reason=%s", model, outcome.reason
+                    )
+                    break
+
+                # ADVANCE: log the mandated downgrade line, then move on.
+                if model_index + 1 < len(models_to_try):
+                    _next_tier = resolve_provider_tier(models_to_try[model_index + 1])
+                    logger.warning(
+                        format_fallback_log(
+                            tier_display_name(_tier),
+                            tier_display_name(_next_tier),
+                            fallback_reason_label(error_type),
+                        )
+                    )
+                model_index += 1
                 continue
 
         raise _AllModelsFailedError(
@@ -3910,30 +4292,63 @@ class GeminiAnalyzer:
             retry_count = 0
             max_retries = config.report_integrity_retry if config.report_integrity_enabled else 0
 
+            # 一次性 Provider 健康预检（每进程仅一次）
+            self.ensure_provider_precheck()
+
+            # === LLM 结果缓存（TTL 24h，key = sha256(code + trade_date + prompt_hash)）===
+            # 注：reports/openrouter_quota.json 与缓存 DB 都不在 00-daily-analysis.yml
+            # 的 git add 范围内，故两者都落在工作区数据目录（可用 LLM_CACHE_PATH 覆盖），
+            # OpenRouter 额度另在 reports/latest.meta.json 的 openrouter_usage 字段留镜像。
+            llm_cache = self._get_llm_result_cache(config)
+            cached_hit = self._lookup_llm_cache(
+                llm_cache,
+                context=context,
+                prompt=prompt,
+                system_prompt=system_prompt,
+            )
+            if cached_hit is not None:
+                # 注意：这里刻意不额外发进度事件。进度序列（68 → 93 → 94 → 95）
+                # 是既有调用方/测试依赖的对外契约，缓存命中只改变"是否真的发起
+                # LLM 调用"，不应改变可观测的进度时间线。
+                logger.info(
+                    "[LLM缓存] %s(%s) 命中缓存（data_source=%s），跳过 LLM 调用",
+                    name,
+                    code,
+                    getattr(cached_hit, "data_source", "llm_cache"),
+                )
+
             while True:
                 start_time = time.time()
-                try:
-                    response_text, model_used, llm_usage = self._call_litellm(
-                        current_prompt,
-                        generation_config,
-                        system_prompt=system_prompt,
-                        stream=True,
-                        stream_progress_callback=stream_progress_callback,
-                        response_validator=self._validate_json_response,
-                        audit_context=legacy_audit_context,
+                if cached_hit is not None and retry_count == 0:
+                    response_text = cached_hit.text
+                    model_used = cached_hit.model or "llm_cache"
+                    llm_usage = dict(cached_hit.usage or {})
+                    llm_usage.setdefault(
+                        "data_source", getattr(cached_hit, "data_source", "llm_cache")
                     )
-                except _AllModelsFailedError as exc:
-                    if exc.last_response_text is not None:
-                        logger.warning(
-                            "[LLM JSON] %s(%s): all models returned invalid JSON, using text fallback",
-                            name,
-                            code,
+                else:
+                    try:
+                        response_text, model_used, llm_usage = self._call_litellm(
+                            current_prompt,
+                            generation_config,
+                            system_prompt=system_prompt,
+                            stream=True,
+                            stream_progress_callback=stream_progress_callback,
+                            response_validator=self._validate_json_response,
+                            audit_context=legacy_audit_context,
                         )
-                        response_text = exc.last_response_text
-                        model_used = exc.last_model
-                        llm_usage = exc.last_usage
-                    else:
-                        raise
+                    except _AllModelsFailedError as exc:
+                        if exc.last_response_text is not None:
+                            logger.warning(
+                                "[LLM JSON] %s(%s): all models returned invalid JSON, using text fallback",
+                                name,
+                                code,
+                            )
+                            response_text = exc.last_response_text
+                            model_used = exc.last_model
+                            llm_usage = exc.last_usage
+                        else:
+                            raise
                 elapsed = time.time() - start_time
 
                 # 记录响应信息
@@ -3997,6 +4412,18 @@ class GeminiAnalyzer:
                         missing_fields,
                     )
                     break
+
+            # 仅在真实调用成功后落缓存（命中缓存的路径不重复写）
+            if cached_hit is None:
+                self._store_llm_cache(
+                    llm_cache,
+                    context=context,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    response=response_text,
+                    model=model_used or "",
+                    usage=llm_usage if isinstance(llm_usage, dict) else None,
+                )
 
             if should_persist_usage_telemetry(llm_usage):
                 persist_llm_usage(llm_usage, model_used, call_type="analysis", stock_code=code)
