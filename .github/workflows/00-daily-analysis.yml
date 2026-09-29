@@ -115,6 +115,20 @@ jobs:
         run: |
           mkdir -p data logs reports .cache
 
+      - name: 恢复新闻缓存（跨 run 持久化）
+        # DirectNewsSearchProvider 将上次成功抓取的新闻写入 data/news_cache.json；
+        # 从 ci-reports 分支拉回上一 run 的缓存，作为本次抓取的兜底/续接，实现跨 run 持久化。
+        # 首次运行或缓存缺失时静默跳过，不影响主流程。
+        run: |
+          mkdir -p data
+          CACHE_URL="https://raw.githubusercontent.com/${{ github.repository }}/ci-reports/data/news_cache.json"
+          if curl -fsSL --max-time 25 "$CACHE_URL" -o data/news_cache.json 2>/dev/null; then
+            echo "✅ 已从 ci-reports 恢复新闻缓存（$(wc -c < data/news_cache.json) bytes）"
+          else
+            echo "ℹ️ 无历史新闻缓存（首次运行/缓存缺失），将全新抓取"
+            rm -f data/news_cache.json
+          fi
+
       - name: 设置日期与触发时段环境变量
         env:
           PAYLOAD_SLOT: ${{ github.event.client_payload.slot }}
@@ -790,6 +804,8 @@ jobs:
           for f in reco.json hotspot_leaders.json holding_fundflow.json; do
             if [ -f "$f" ]; then git add -f "$f"; fi
           done
+          # 跨 run 持久化：新闻缓存（DirectNewsSearchProvider 兜底用；缺失不阻断发布）
+          if [ -f data/news_cache.json ]; then git add -f data/news_cache.json; fi
           if git diff --cached --quiet; then
             echo "📭 无内容变化，跳过提交"
           else

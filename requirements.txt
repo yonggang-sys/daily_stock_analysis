@@ -50,7 +50,7 @@ tavily-python>=0.3.0        # Tavily Search API
 google-search-results>=2.4.0  # SerpAPI
 
 # Network requests
-requests>=2.31.0            # HTTP requests
+requests>=2.31.0            # HTTP requests; also used by DirectNewsSearchProvider (keyless direct news source: EastMoney/THS/Cailianpress/Sina)
 markdown2>=2.4.0            # Markdown to HTML
 imgkit>=1.2.0              # Markdown to image; requires wkhtmltopdf
 fake-useragent>=1.4.0       # Random User-Agent support

@@ -442,7 +442,9 @@ class TestSearXNGSearchProvider(unittest.TestCase):
         self.assertTrue(any(provider.name == "SearXNG" for provider in service._providers))
 
     def test_search_service_does_not_add_public_searxng_provider_by_default(self):
-        service = SearchService()
+        # 本用例校验"默认配置下不注入任何 provider"，需显式关闭零 Key 的
+        # DirectNews，否则它会在无 Key 时领航并使 is_available 为 True。
+        service = SearchService(direct_news_enabled=False)
 
         self.assertFalse(service.is_available)
         self.assertFalse(any(provider.name == "SearXNG" for provider in service._providers))
