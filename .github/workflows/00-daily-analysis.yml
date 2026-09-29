@@ -145,7 +145,15 @@ jobs:
           fi
           [ -z "$SLOT" ] && SLOT="adhoc"
           echo "RUN_SLOT=$SLOT" >> $GITHUB_ENV
-          echo "触发时段: $SLOT（事件: ${{ github.event_name }}）"
+          # 新闻搜索总开关：盘中(noon=11:45)跳过以省 Tavily 等按次计费额度；
+          # 盘前(pre)/收盘(close)/adhoc(手动)均启用。导出到 $GITHUB_ENV 全步骤可见。
+          if [ "$SLOT" = "noon" ]; then
+            NEWS_ENABLED="false"
+          else
+            NEWS_ENABLED="true"
+          fi
+          echo "NEWS_SEARCH_ENABLED=$NEWS_ENABLED" >> $GITHUB_ENV
+          echo "触发时段: $SLOT（事件: ${{ github.event_name }}）/ 新闻搜索(News): $NEWS_ENABLED"
 
       - name: 恢复数据缓存
         uses: actions/cache@v5
@@ -437,6 +445,9 @@ jobs:
           SEARXNG_PUBLIC_INSTANCES_ENABLED: ${{ vars.SEARXNG_PUBLIC_INSTANCES_ENABLED || secrets.SEARXNG_PUBLIC_INSTANCES_ENABLED }}
           # [zhulinsen新增] SearXNG 超时配置
           SEARXNG_TIMEOUT_SECONDS: ${{ vars.SEARXNG_TIMEOUT_SECONDS || secrets.SEARXNG_TIMEOUT_SECONDS }}
+          # [时段开关] 盘中(noon=11:45)置 false 以省 Tavily 等按次计费额度；
+          # 盘前/收盘/手动(adhooc)置 true。由「设置日期与触发时段环境变量」步按 RUN_SLOT 写入 $GITHUB_ENV。
+          NEWS_SEARCH_ENABLED: ${{ env.NEWS_SEARCH_ENABLED }}
           
           # ==========================================
           # 通知渠道（可同时配置多个，全部推送）
@@ -626,6 +637,7 @@ jobs:
           echo "【搜索引擎】"
           echo "  Bocha API Keys: $([ -n "$BOCHA_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  Tavily API Keys: $([ -n "$TAVILY_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  新闻搜索总开关(NEWS_SEARCH_ENABLED): ${NEWS_SEARCH_ENABLED:-true}（noon 时段禁用以省按次额度）"
           echo "  SerpAPI Keys: $([ -n "$SERPAPI_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  MiniMax API Keys: $([ -n "$MINIMAX_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  Brave API Keys: $([ -n "$BRAVE_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"

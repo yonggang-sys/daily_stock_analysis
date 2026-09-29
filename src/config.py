@@ -2989,7 +2989,13 @@ class Config:
         return bool(self.searxng_base_urls) or bool(self.searxng_public_instances_enabled)
 
     def has_search_capability_enabled(self) -> bool:
-        """Whether any search provider is configured or SearXNG fallback is enabled."""
+        """Whether any search provider is configured or SearXNG fallback is enabled.
+
+        NEWS_SEARCH_ENABLED=false（盘中 noon 时段为省 Tavily 等按次计费额度而
+        禁用新闻搜索）时，视为未启用搜索能力，与运行时 SearchService 行为保持一致。
+        """
+        if os.getenv("NEWS_SEARCH_ENABLED", "true").strip().lower() in ("0", "false", "no", "off"):
+            return False
         return bool(
             self.anspire_api_keys
             or self.bocha_api_keys

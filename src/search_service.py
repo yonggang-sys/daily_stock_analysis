@@ -2865,6 +2865,28 @@ class SearchService:
             news_strategy_profile: 新闻窗口策略档位（ultra_short/short/medium/long）
             direct_news_enabled: 是否启用零 Key 直连新闻源 DirectNews（默认 True；单测可置 False 验证无 provider 退化路径）
         """
+        # ── NEWS_SEARCH_ENABLED 总开关（按触发时段控制新闻源是否启用）────────
+        # 由工作流在盘前(pre)/收盘(close)置 true、盘中(noon)置 false，
+        # 以节省 Tavily 等按次计费搜索源的免费额度（如 Tavily 每月 1000 次）。
+        # false/0/no/off → 清空所有 Key 型 provider 参数并禁用 DirectNews，
+        # 使 self._providers 为空、is_available=False，达到零配额且安全降级
+        # （所有公开搜索方法在 is_available=False 时返回空 SearchResponse，不抛异常）。
+        _news_enabled_raw = os.getenv("NEWS_SEARCH_ENABLED", "true").strip().lower()
+        self.news_search_enabled = _news_enabled_raw not in ("0", "false", "no", "off")
+        if not self.news_search_enabled:
+            bocha_keys = []
+            tavily_keys = []
+            anspire_keys = []
+            brave_keys = []
+            serpapi_keys = []
+            minimax_keys = []
+            searxng_base_urls = []
+            searxng_public_instances_enabled = False
+            direct_news_enabled = False
+            logger.info(
+                "NEWS_SEARCH_ENABLED=false：本时段禁用新闻搜索（零配额），"
+                "跳过全部搜索 provider 初始化"
+            )
         self._constructor_kwargs: Dict[str, Any] = {
             "bocha_keys": list(bocha_keys or []),
             "tavily_keys": list(tavily_keys or []),
