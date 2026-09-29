@@ -2945,9 +2945,17 @@ class SearchService:
         # 0. DirectNews（零 Key 直连源，最高优先级，置于链最前、优先于 Anspire）
         #    NEWS_DIRECT_ENABLED=false 时禁用；不依赖任何 API Key。
         #    direct_news_enabled=False 时整体关闭（单测无 provider 退化路径用）。
-        if direct_news_enabled and os.getenv("NEWS_DIRECT_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off"):
+        # 仅当未配置任何 Key 型 provider 时才由零 Key 的 DirectNews 领航降级链：
+        # 生产/CI 无 Key 场景下它仍是唯一可用新闻源（本 PR 目标）；一旦配置了
+        # Anspire/Tavily/Bocha 等 Key 型 provider，则由它们优先，保持既有
+        # provider 优先级与 mock 契约不被抢先拦截。
+        if (
+            direct_news_enabled
+            and os.getenv("NEWS_DIRECT_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
+            and not self._providers
+        ):
             self._providers.insert(0, DirectNewsSearchProvider())
-            logger.info("已启用 DirectNews 零 Key 直连新闻源（东财/同花顺/财联社/新浪 并行竞速）")
+            logger.info("已启用 DirectNews 零 Key 直连新闻源（无 Key provider 时领航；东财/同花顺/财联社/新浪 并行竞速）")
 
         if not self._providers:
             logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")

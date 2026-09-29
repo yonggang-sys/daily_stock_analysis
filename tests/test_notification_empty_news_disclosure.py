@@ -296,7 +296,12 @@ class NoSearchProviderDisclosureTestCase(unittest.TestCase):
     def test_no_registered_providers_discloses_missing_news_evidence(self):
         from src.search_service import SearchService
 
-        search_service = SearchService(searxng_public_instances_enabled=False)
+        # 本用例校验"未注册任何搜索 provider"时的披露文案，需显式关闭零 Key 的
+        # DirectNews，否则它会在无 Key 时领航并让 _providers 非空。
+        search_service = SearchService(
+            searxng_public_instances_enabled=False,
+            direct_news_enabled=False,
+        )
         self.assertEqual([], search_service._providers)
         self.assertFalse(search_service.is_available)
 
