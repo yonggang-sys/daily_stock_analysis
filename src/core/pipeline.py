@@ -695,13 +695,13 @@ class StockAnalysisPipeline:
                 # 反而不会提示。
                 news_result_count = 0
 
-                # 使用多维度搜索（最多5次搜索）
+                # 使用多维度搜索（最多2次搜索，省 Tavily 等按次计费额度）
                 # 指数目标：查询 subject 仅用注册表中文名称，不把 canonical code /
                 # 六码机器码带入查询（Story 1.5 V7）。
                 intel_results = self.search_service.search_comprehensive_intel(
                     stock_code=("" if is_index else code),
                     stock_name=stock_name,
-                    max_searches=5
+                    max_searches=2
                 )
 
                 # 格式化情报报告
