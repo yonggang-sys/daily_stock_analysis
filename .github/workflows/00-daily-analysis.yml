@@ -804,6 +804,22 @@ jobs:
               "${{ github.run_number }}" \
               "ci_emit" > reports/latest.meta.json
           fi
+
+          # H-23(2026-09-30)：大盘复盘单独发布——本地仪表盘「AI 复盘报告」七章节消费此文件。
+          # 此前只发布 report_*.md（个股决策仪表盘报告），market_review_*.md 虽已生成却不发布，
+          # 仪表盘取到的正文里根本没有「大盘复盘」章节，七章节只能退化为规则引擎短句。
+          MR=$(ls -t reports/market_review_*.md 2>/dev/null | head -1) || true
+          if [ -n "$MR" ]; then
+            cp "$MR" reports/market_review_latest.md
+            MR_DATE=$(basename "$MR" .md | sed 's/market_review_//')
+            printf '{"date":"%s","source":"%s","run_number":"%s","generated_at":"%s"}\n' \
+              "$MR_DATE" "$MR" "${{ github.run_number }}" \
+              "$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" > reports/market_review_latest.meta.json
+            echo "✅ 大盘复盘已发布: $MR"
+          else
+            echo "ℹ️ 本次无 market_review_*.md，跳过"
+          fi
+
           # 使用孤儿分支仅含产物，避免 force-push 整个仓库（含 .github/workflows）触发
           # GitHub 对 workflow 文件的写权限要求（GITHUB_TOKEN 默认仅有 contents:write）。
           git config user.name "github-actions[bot]"
@@ -812,6 +828,9 @@ jobs:
           git rm -rf --cached . >/dev/null 2>&1 || true
           if [ -f reports/latest.md ]; then git add -f reports/latest.md; fi
           git add -f reports/latest.meta.json
+          # H-23：大盘复盘产物（缺失不阻断发布）
+          if [ -f reports/market_review_latest.md ]; then git add -f reports/market_review_latest.md; fi
+          if [ -f reports/market_review_latest.meta.json ]; then git add -f reports/market_review_latest.meta.json; fi
           # 方案A 产物（ci_emit 产出；缺失则跳过，不阻断发布）
           for f in reco.json hotspot_leaders.json holding_fundflow.json; do
             if [ -f "$f" ]; then git add -f "$f"; fi
