@@ -7716,6 +7716,42 @@
             "title": "Source",
             "description": "数据来源"
           },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp",
+            "description": "上下文原始时间，可能为抓取时间"
+          },
+          "provider_timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Timestamp",
+            "description": "来源记录的观测时间"
+          },
+          "fetched_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fetched At",
+            "description": "数据抓取时间，不代表观测时间"
+          },
           "warnings": {
             "items": {
               "type": "string"

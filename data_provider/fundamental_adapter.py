@@ -305,6 +305,36 @@ def _extract_latest_row(df: pd.DataFrame, stock_code: str) -> Optional[pd.Series
     return df.iloc[0]
 
 
+def _financial_abstract_row(df: pd.DataFrame) -> Optional[pd.Series]:
+    """Normalize Sina's metric rows and report-period columns into one row."""
+    periods = [c for c in df.columns if re.fullmatch(r"\d{8}", str(c)) and _normalize_report_date(str(c))]
+    if not periods:
+        return None
+    period = max(periods, key=str)
+    metrics = df.drop_duplicates(subset=["指标"]).set_index("指标")[period]
+    # Include AkShare's unit-bearing labels; exact aliases keep percentages
+    # separate from amounts and preserve qualifiers such as weighted ROE.
+    aliases = {
+        "营业总收入": ["营业总收入", "营业收入", "营业总收入(元)"],
+        "归母净利润": ["归母净利润", "归属于母公司股东的净利润", "归属净利润(元)"],
+        "经营活动产生的现金流量净额": [
+            "经营活动产生的现金流量净额", "经营活动产生的现金流量净额(元)", "经营现金流量净额(元)", "经营现金流量净额",
+        ],
+        "营业收入同比": ["营业总收入同比增长率", "营业收入同比增长率", "营业总收入同比增长(%)", "营业总收入增长率"],
+        "净利润同比": ["净利润同比增长率", "归母净利润同比增长率", "归属净利润同比增长(%)", "归属母公司净利润增长率"],
+        "净资产收益率": ["净资产收益率", "净资产收益率(加权)", "净资产收益率(%)", "净资产收益率(加权)(%)", "净资产收益率(ROE)"],
+        "毛利率": ["销售毛利率", "毛利率", "销售毛利率(%)"],
+    }
+    values = {"报告期": str(period)}
+    for key, names in aliases.items():
+        for name in names:
+            value = _safe_float(metrics.get(name))
+            if value is not None and math.isfinite(value):
+                values[key] = value
+                break
+    return pd.Series(values)
+
+
 class AkshareFundamentalAdapter:
     """AkShare adapter for fundamentals, capital flow and dragon-tiger signals."""
 
@@ -368,19 +398,24 @@ class AkshareFundamentalAdapter:
         ])
         result["errors"].extend(fin_errors)
         if fin_df is not None:
-            row = _extract_latest_row(fin_df, stock_code)
+            row = _financial_abstract_row(fin_df) if "指标" in fin_df else _extract_latest_row(fin_df, stock_code)
             if row is not None:
                 revenue_yoy = _safe_float(_pick_by_keywords(row, ["营业收入同比", "营收同比", "收入同比", "同比增长"]))
                 profit_yoy = _safe_float(_pick_by_keywords(row, ["净利润同比", "净利同比", "归母净利润同比"]))
                 roe = _safe_float(_pick_by_keywords(row, ["净资产收益率", "ROE", "净资产收益"]))
                 gross_margin = _safe_float(_pick_by_keywords(row, ["毛利率"]))
                 report_date = _normalize_report_date(_pick_by_keywords(row, _DIVIDEND_KEYWORD_MAP["report_date"]))
-                revenue = _safe_float(_pick_by_keywords(row, ["营业总收入", "营业收入", "营收"]))
-                net_profit_parent = _safe_float(_pick_by_keywords(row, ["归母净利润", "母公司股东净利润", "净利润"]))
+                is_wide = "指标" in fin_df
+                revenue = _safe_float(
+                    row.get("营业总收入") if is_wide else _pick_by_keywords(row, ["营业总收入", "营业收入", "营收"])
+                )
+                net_profit_parent = _safe_float(
+                    row.get("归母净利润") if is_wide else _pick_by_keywords(row, ["归母净利润", "母公司股东净利润", "净利润"])
+                )
                 operating_cash_flow = _safe_float(
                     _pick_by_keywords(row, ["经营活动产生的现金流量净额", "经营现金流", "经营活动现金流"])
                 )
-                result["growth"] = {
+                growth_payload = {
                     "revenue_yoy": revenue_yoy,
                     "net_profit_yoy": profit_yoy,
                     "roe": roe,
@@ -393,9 +428,12 @@ class AkshareFundamentalAdapter:
                     "operating_cash_flow": operating_cash_flow,
                     "roe": roe,
                 }
-                if any(v is not None for v in financial_report_payload.values()):
+                if any(v is not None for k, v in financial_report_payload.items() if k != "report_date"):
                     result["earnings"]["financial_report"] = financial_report_payload
-                result["source_chain"].append(f"growth:{fin_source}")
+                if any(v is not None for v in growth_payload.values()):
+                    result["growth"] = growth_payload
+                if result["growth"] or result["earnings"].get("financial_report"):
+                    result["source_chain"].append(f"growth:{fin_source}")
 
         # Earnings forecast
         forecast_df, forecast_source, forecast_errors = self._call_df_candidates([
@@ -481,39 +519,38 @@ class AkshareFundamentalAdapter:
             "errors": [],
         }
 
+        from .akshare_fetcher import _to_sina_tx_symbol
+
+        market = _to_sina_tx_symbol(stock_code)[:2]
+        stock_code = _normalize_code(stock_code)
         stock_df, stock_source, stock_errors = self._call_df_candidates([
-            ("stock_individual_fund_flow", {"stock": stock_code}),
-            ("stock_individual_fund_flow", {"symbol": stock_code}),
-            ("stock_individual_fund_flow", {}),
-            ("stock_main_fund_flow", {"symbol": stock_code}),
-            ("stock_main_fund_flow", {}),
+            ("stock_individual_fund_flow", {"stock": stock_code, "market": market}),
         ])
         result["errors"].extend(stock_errors)
-        if stock_df is not None:
-            row = _extract_latest_row(stock_df, stock_code)
-            if row is not None:
-                net_inflow = _safe_float(_pick_by_keywords(row, ["主力净流入", "净流入", "净额"]))
-                inflow_5d = _safe_float(_pick_by_keywords(row, ["5日", "五日"]))
-                inflow_10d = _safe_float(_pick_by_keywords(row, ["10日", "十日"]))
-                result["stock_flow"] = {
-                    "main_net_inflow": net_inflow,
-                    "inflow_5d": inflow_5d,
-                    "inflow_10d": inflow_10d,
-                }
-                result["source_chain"].append(f"capital_stock:{stock_source}")
+        if stock_df is not None and "日期" in stock_df:
+            dates = pd.to_datetime(stock_df["日期"], errors="coerce")
+            if dates.notna().any():
+                row = stock_df.loc[dates.idxmax()]
+                net_inflow = _safe_float(row.get("主力净流入-净额"))
+                if net_inflow is not None and math.isfinite(net_inflow):
+                    result["stock_flow"] = {
+                        "main_net_inflow": net_inflow,
+                        "inflow_5d": None,
+                        "inflow_10d": None,
+                    }
+                    result["source_chain"].append(f"capital_stock:{stock_source}")
 
         sector_df, sector_source, sector_errors = self._call_df_candidates([
             ("stock_sector_fund_flow_rank", {}),
-            ("stock_sector_fund_flow_summary", {}),
         ])
         result["errors"].extend(sector_errors)
         if sector_df is not None:
             name_col = next((c for c in sector_df.columns if any(k in str(c) for k in ("板块", "行业", "名称", "name"))), None)
-            flow_col = next((c for c in sector_df.columns if any(k in str(c) for k in ("净流入", "主力", "flow", "净额"))), None)
+            flow_col = "今日主力净流入-净额" if "今日主力净流入-净额" in sector_df else None
             if name_col and flow_col:
                 work_df = sector_df[[name_col, flow_col]].copy()
                 work_df[flow_col] = pd.to_numeric(work_df[flow_col], errors="coerce")
-                work_df = work_df.dropna(subset=[flow_col])
+                work_df = work_df.loc[work_df[flow_col].between(-math.inf, math.inf, inclusive="neither")]
                 top_df = work_df.nlargest(top_n, flow_col)
                 bottom_df = work_df.nsmallest(top_n, flow_col)
                 result["sector_rankings"] = {

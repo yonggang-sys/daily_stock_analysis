@@ -284,6 +284,22 @@ const settingsHelpZhCN: SettingsHelpMap = {
     impact: ['影响 A 股日线回退链、实时行情、股票名称/列表与大盘复盘数据覆盖度。'],
     notes: ['不要在 issue、日志或截图中暴露真实 Key。'],
   },
+  'settings.data_source.MX_APIKEY': {
+    title: '妙想（MX_API）API Key',
+    summary: '用于启用妙想补充数据源：东财公开接口失败或被限流时，兜底获取筹码分布与个股资金流。',
+    usage: '在妙想 Skills 页面获取 API Key 后填入；未配置时系统行为完全不变。',
+    valueNotes: ['该 Key 是可选补充项，不参与日 K 主链路。'],
+    impact: ['影响筹码分布与个股资金流在东财接口异常时的可用性。'],
+    notes: ['不要在 issue、日志或截图中暴露真实 Key。'],
+  },
+  'settings.data_source.MX_PRIORITY': {
+    title: '妙想数据源优先级',
+    summary: '控制妙想补充数据源在数据源回退链中的位置。',
+    usage: '填写整数；数字越小越早尝试，默认 6。未配置 MX_APIKEY 时该优先级不会生效。',
+    valueNotes: ['该数据源不提供日 K 行情，优先级仅影响筹码分布/资金流的兜底顺序。'],
+    impact: ['影响补充数据块的兜底顺序。'],
+    notes: ['一般无需调整默认值。'],
+  },
   'settings.data_source.TICKFLOW_PRIORITY': {
     title: 'TickFlow 日 K 优先级',
     summary: '控制 TickFlow 在普通 A 股日 K 数据源回退链中的位置。',
@@ -326,10 +342,10 @@ const settingsHelpZhCN: SettingsHelpMap = {
   },
   'settings.base.SCREENING_ENABLED': {
     title: '选股',
-    summary: '控制是否启用选股页；实现参考 AlphaSift。',
-    usage: '默认关闭。设为 true 后显示选股入口并启用选股策略。',
+    summary: '控制是否启用选股策略；实现参考 AlphaSift。',
+    usage: '默认关闭。导航始终保留选股入口；设为 true 后可运行选股策略。',
     valueNotes: ['选股结果仅用于研究辅助，不构成投资建议。'],
-    impact: ['影响 Web 选股入口、策略读取和选股 API。'],
+    impact: ['影响策略读取和选股 API，不隐藏导航入口。'],
     notes: ['关闭时不影响原有分析、报告和通知流程。'],
   },
   'settings.data_source.REALTIME_SOURCE_PRIORITY': {
@@ -1515,6 +1531,22 @@ const settingsHelpEnUS: SettingsHelpMap = {
     impact: ['Affects A-share daily-data fallback, realtime quotes, stock list/name lookup, and market-review coverage.'],
     notes: ['Do not expose real keys in issues, logs, or screenshots.'],
   },
+  'settings.data_source.MX_APIKEY': {
+    title: 'MiaoXiang (MX_API) API Key',
+    summary: 'Enables the MiaoXiang supplementary provider: fills chip distribution and per-stock capital flow when public eastmoney endpoints fail or are rate-limited.',
+    usage: 'Paste a MiaoXiang Skills API key here. When empty, system behavior is unchanged.',
+    valueNotes: ['Optional supplementary key; does not participate in the daily K-line chain.'],
+    impact: ['Affects chip-distribution and capital-flow availability when eastmoney endpoints misbehave.'],
+    notes: ['Do not expose real keys in issues, logs, or screenshots.'],
+  },
+  'settings.data_source.MX_PRIORITY': {
+    title: 'MiaoXiang Provider Priority',
+    summary: 'Controls where the MiaoXiang supplementary provider sits in the fallback chain.',
+    usage: 'Use an integer. Lower numbers are tried earlier. The default is 6. No effect unless MX_APIKEY is configured.',
+    valueNotes: ['This provider does not serve daily K-lines; the priority only orders supplementary blocks.'],
+    impact: ['Affects fallback order of supplementary data blocks.'],
+    notes: ['The default is fine for most setups.'],
+  },
   'settings.data_source.TICKFLOW_PRIORITY': {
     title: 'TickFlow Daily K-line Priority',
     summary: 'Controls where TickFlow sits in the generic A-share daily K-line provider fallback chain.',
@@ -1581,10 +1613,10 @@ const settingsHelpEnUS: SettingsHelpMap = {
   },
   'settings.base.SCREENING_ENABLED': {
     title: 'Screening',
-    summary: 'Controls the Screening page, implemented with reference to AlphaSift.',
-    usage: 'Disabled by default. Set it to true to show Screening and enable screening strategies.',
+    summary: 'Controls screening strategies, implemented with reference to AlphaSift.',
+    usage: 'Disabled by default. Screening stays in navigation; set this to true to run screening strategies.',
     valueNotes: ['Screening output is for research support only and is not investment advice.'],
-    impact: ['Affects the Web screening entry, strategy loading, and screening API.'],
+    impact: ['Affects strategy loading and the screening API, without hiding the navigation entry.'],
     notes: ['Disabling it does not affect existing analysis, reports, or notifications.'],
   },
   'settings.data_source.REALTIME_SOURCE_PRIORITY': {

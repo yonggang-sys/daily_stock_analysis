@@ -71,6 +71,9 @@ _CATEGORY_DEFINITIONS: List[Dict[str, Any]] = [
 ]
 
 WEB_SETTINGS_HIDDEN_FROM_UI = {
+    # Optional FXMacroData authorization is read from the process environment
+    # when a tool runs; it is not a Web settings or model-input field.
+    "FXMACRODATA_API_KEY",
     "DATABASE_PATH",
     "SQLITE_WAL_ENABLED",
     "SQLITE_BUSY_TIMEOUT_MS",
@@ -834,6 +837,34 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "options": [],
         "validation": {},
         "display_order": 18,
+    },
+    "MX_APIKEY": {
+        "title": "MiaoXiang (MX_API) API Key",
+        "description": "API key for the optional MiaoXiang supplementary data provider (chip distribution / per-stock capital flow). Only used when the primary eastmoney endpoints fail or are rate-limited; not configured means no behavior change.",
+        "category": "data_source",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": None,
+        "options": [],
+        "validation": {},
+        "display_order": 20,
+    },
+    "MX_PRIORITY": {
+        "title": "MiaoXiang Data Source Priority",
+        "description": "Priority for the MiaoxiangFetcher supplementary data source. Lower numbers are tried earlier. The fetcher never participates in daily K-line fetching.",
+        "category": "data_source",
+        "data_type": "integer",
+        "ui_control": "number",
+        "is_sensitive": False,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": "6",
+        "options": [],
+        "validation": {"min": 0, "max": 99},
+        "display_order": 21,
     },
     "TICKFLOW_BATCH_SIZE": {
         "title": "TickFlow Batch Size",
@@ -4731,6 +4762,19 @@ _FIELD_HELP_METADATA: Dict[str, Dict[str, Any]] = {
     "TICKFLOW_PRIORITY": {
         "help_key": "settings.data_source.TICKFLOW_PRIORITY",
         "examples": ["TICKFLOW_PRIORITY=2"],
+        "docs": _DOC_FULL_GUIDE_DATA_SOURCE,
+    },
+    "MX_APIKEY": {
+        "help_key": "settings.data_source.MX_APIKEY",
+        "examples": [
+            "MX_APIKEY=mkt_your_miaoxiang_key",
+        ],
+        "docs": _DOC_FULL_GUIDE_DATA_SOURCE,
+        "warning_codes": ["secret_value"],
+    },
+    "MX_PRIORITY": {
+        "help_key": "settings.data_source.MX_PRIORITY",
+        "examples": ["MX_PRIORITY=6"],
         "docs": _DOC_FULL_GUIDE_DATA_SOURCE,
     },
     "TICKFLOW_KLINE_ADJUST": {

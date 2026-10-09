@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from src.agent.agent_backend import (
     AgentRunRequest,
     AgentRunResult,
@@ -311,7 +313,7 @@ def test_production_codex_preparation_matches_the_three_phase6_tools(monkeypatch
         backend=backend,
         config=config,
         context_llm_adapter=None,
-        skill_instructions="不得进入 Codex Prompt：新闻、热点、持仓",
+        skill_instructions="",
         default_skill_policy="不得进入 Codex Prompt：K线、技术指标、筹码",
         max_steps=3,
         timeout_seconds=30,
@@ -354,6 +356,52 @@ def test_production_codex_preparation_matches_the_three_phase6_tools(monkeypatch
         "持仓",
     ):
         assert unavailable_capability not in instructions
+
+
+@pytest.mark.parametrize("requested, saved, expected", [
+    (None, ["selected"], "SELECTED_RULE"),
+    ([], ["selected"], "DEFAULT_RULE"),
+    (["selected"], None, "SELECTED_RULE"),
+    (None, None, "DEFAULT_RULE"),
+])
+def test_codex_selected_skills_reach_transport_after_session_resolution(monkeypatch, requested, saved, expected):
+    import copy
+    from src.agent.factory import build_agent_chat_executor
+    from src.agent.skills.base import Skill, SkillManager
+    from src.services.agent_chat_session_service import AgentChatSessionService
+    from src.storage import DatabaseManager
+
+    monkeypatch.setattr(DatabaseManager, "_instance", None)
+    db = DatabaseManager(db_url="sqlite:///:memory:")
+    if saved is not None:
+        db.save_conversation_user_turn("skill-session", "previous question", saved)
+    catalog = SkillManager()
+    catalog.register(Skill("baseline", "默认", "default", "DEFAULT_RULE", default_active=True))
+    catalog.register(Skill("selected", "自选", "selected", "SELECTED_RULE: 需要数据时调用 get_realtime_quote"))
+    monkeypatch.setattr("src.agent.factory.get_skill_manager", lambda config: copy.deepcopy(catalog))
+    monkeypatch.setattr("src.agent.conversation.get_db", lambda: db)
+    monkeypatch.setattr("src.agent.executor.build_visible_chat_history", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("src.agent.codex_agent_backend.build_hardened_command", lambda **kwargs: ["codex"])
+    config = SimpleNamespace(agent_backend="codex_app_server", agent_arch="single", agent_orchestrator_timeout_s=30)
+    selection = AgentChatSessionService(db).resolve_skill_selection(config, "skill-session", requested)
+    executor = build_agent_chat_executor(config, skills=selection.effective_skill_ids)
+    executor.backend.transport_factory = _FakeTransport
+    result = executor.chat(
+        "分析 AAPL", "skill-session", context={"stock_code": "AAPL"},
+        selected_skill_ids=selection.selected_skill_ids_update,
+    )
+    assert result.success
+    instructions = _FakeTransport.last.thread_kwargs["developer_instructions"]
+    assert expected in instructions
+    assert ("DEFAULT_RULE" if expected == "SELECTED_RULE" else "SELECTED_RULE") not in instructions
+    assert "技能要求不能扩展工具权限" in instructions
+    assert "不得宣称已完整执行" in instructions
+    assert _FakeTransport.last.thread_kwargs["tool_names"] == [
+        "get_analysis_context", "get_skill_backtest_summary", "get_strategy_backtest_summary",
+    ]
+    assert db.get_conversation_session_selected_skill_ids("skill-session") == (
+        saved if requested is None else requested
+    )
 
 
 def test_litellm_preparation_keeps_the_existing_chat_workflow() -> None:

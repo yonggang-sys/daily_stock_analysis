@@ -77,6 +77,7 @@ Web 启用步骤：打开「设置 → Agent 设置 → 问股生成方式」，
 - Phase 6 的 Codex App Server Agent 当前支持 macOS、Linux，以及 DSA 后端完整运行于 WSL 的环境；原生 Windows 后端会在状态检查和 transport 启动前明确拒绝。此限制不影响 Phase 2 `GENERATION_BACKEND=codex_cli` 已有的 Windows 生成能力。
 - Codex 当前只开放已保存分析上下文、全局回测汇总和策略回测汇总的只读查询。本期只验证并承诺这三个工具的独立进程、停止、超时和回收闭环；实时行情、新闻、市场热点、技术指标重算、个股回测明细和持仓工具未纳入本期验证，因此不会出现在 Codex 的工具列表中。需要这些能力时，请在 Web 中选择「默认模型」。明确股票代码或 Web 已选择的唯一股票只会为已开放的历史分析上下文工具建立股票范围；遇到同名歧义时不会猜测。
 - 该能力不是离线模型。股票代码、问题、新闻、持仓上下文和脱敏后的工具结果可能由 Codex 自身配置的服务处理。
+- Codex 问股会传递当前激活的交易 Skill 指令。省略选择时沿用会话已保存选择（新会话使用默认技能），显式空列表清除会话选择并回到默认技能。Skill 只用于解读三个只读工具返回的已保存数据，不能增加工具权限；所需数据或能力不足时必须说明缺失项，不能声称完整执行了技能。
 - 当前只支持 single-agent Chat；不支持 Codex Multi Agent 或 Codex Deep Research。现有 LiteLLM Multi Agent 与 Deep Research 不受影响。
 - 每次 Chat 都创建新的 ephemeral App Server thread；DSA 继续保存原有可见会话历史，并在下一轮注入，但不会注入 LiteLLM provider trace。Web 客户端不会收到 chain-of-thought、原始 JSON-RPC、stderr 或完整工具参数/结果；Codex 只接收完成该轮分析所需的脱敏工具结果。
 - 用户停止问股时，页面会先显示“正在停止”。DSA 会中断 Codex turn，并结束、回收本轮独立运行的工具进程；只有确认 Codex 与工具进程均已退出后，原问股请求才返回最终“已停止”。超时和客户端断开也遵守同一清理边界，不会在后台仍有本轮任务时提前宣告结束。该契约仅作用于 Codex，不改变默认 LiteLLM Agent 的执行方式。
@@ -467,7 +468,7 @@ model_list:
 
 - 运行时选择：`GENERATION_BACKEND`、`GENERATION_FALLBACK_BACKEND`、`GENERATION_BACKEND_TIMEOUT_SECONDS`、`GENERATION_BACKEND_MAX_OUTPUT_BYTES`、`GENERATION_BACKEND_MAX_CONCURRENCY`、`LOCAL_CLI_BACKEND_MAX_CONCURRENCY`、`AGENT_GENERATION_BACKEND`、`LLM_CHANNELS`、`LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`AGENT_LITELLM_MODEL`、`VISION_MODEL`、`VISION_PROVIDER_PRIORITY`、`LLM_TEMPERATURE`、`LLM_USAGE_HMAC_SECRET`、`LLM_USAGE_HMAC_KEY_VERSION`、`LLM_PROMPT_CACHE_TELEMETRY_ENABLED`、`LLM_PROMPT_CACHE_HINTS_ENABLED`、`LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL`
 - 多 Key：`GEMINI_API_KEYS`、`ANTHROPIC_API_KEYS`、`OPENAI_API_KEYS`、`DEEPSEEK_API_KEYS`（当前 workflow 仅从 repository secrets 导入，不会读取同名 Variables）
-- 常用渠道名：`primary`、`secondary`、`aihubmix`、`deepseek`、`dashscope`、`zhipu`、`moonshot`、`minimax`、`volcengine`、`siliconflow`、`openrouter`、`gemini`、`anthropic`、`openai`、`ollama`
+- 常用渠道名：`primary`、`secondary`、`aihubmix`、`deepseek`、`dashscope`、`zhipu`、`moonshot`、`minimax`、`volcengine`、`siliconflow`、`openrouter`、`requesty`、`gemini`、`anthropic`、`openai`、`ollama`
 
 例如在 GitHub Actions 中配置 `LLM_CHANNELS=primary,deepseek` 时，需同步配置 `LLM_PRIMARY_*` / `LLM_DEEPSEEK_*`。其中 `LLM_<NAME>_API_KEY` / `LLM_<NAME>_API_KEYS` 当前也仅从 repository secrets 导入；如果你把这些值放在 Variables，运行时不会生效。若使用自定义渠道名（如 `my_proxy`），GitHub Actions 还必须在 workflow `env:` 中显式新增对应的 `LLM_MY_PROXY_*` 映射；本地 `.env` 和 Docker 不受这个限制。
 

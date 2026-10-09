@@ -25,6 +25,7 @@
 | [完整配置与部署指南](full-guide.md) | 环境准备、运行方式、配置说明、部署路径和常见问题 |
 | [FAQ](FAQ.md) | 常见配置、模型、通知、部署和运行问题 |
 | [数据源稳定性与故障处理图示](data-source-stability.md) | Tushare、TickFlow、AkShare、Efinance、YFinance、Longbridge 等已接入源的使用场景、fallback 链路和推荐配置 |
+| [数据中心](data-center-diagnostics.md) | 只读 Provider 能力、数据集质量、精确市场支持与运行时优先级 |
 | [更新日志](CHANGELOG.md) | 版本变化、能力调整和迁移说明 |
 
 ## 配置
@@ -42,12 +43,16 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [自选股变化状态与下一步](watchlist-next-action.md) | 首页自选股列表的变化、状态、下一步三段信号、映射规则和后续扩展边界 |
 | [Bot 命令与接入](bot-command.md) | Bot 命令、Webhook、平台接入和回调说明 |
 | [Bot 平台配置](bot/) | 飞书、钉钉、Discord 等 Bot 配置截图和补充说明 |
 | [实时告警中心](alerts.md) | EventMonitor 基线、Web 规则管理、通知结果、冷却状态和 Phase 边界 |
 | [个股研究聚合 API](stock-profile-api.md) | 单一 stock-profile 契约、分块质量状态、代码归一与后续 Web 边界 |
 | [DecisionSignal 决策信号专题](decision-signals.md) | AI 建议池字段语义、API、Web 展示、告警/通知/组合风险联动、后验评估、脱敏、迁移与回滚 |
+| [ETF 轮动](etf-rotation.md) | `--etf-rotation` 规则化双动量轮动：规则、配置、报告章节、参数平原解读与数据告警边界 |
 | [ResearchArtifact 结构化研究产物](research-artifact.md) | structured_report 字段、Thesis / Evidence / Invalidation / Next Action / Data Quality 契约和旧报告兼容边界 |
+| [组合风险与暴露看板](portfolio-risk-exposure-dashboard.md) | 持仓页风险旗标、市场暴露、币种暴露和价格质量聚合展示 |
+| [选股解释契约](screening-explanations.md) | Why Selected / Why Now 的后端确定性解释、来源、质量状态与缺失值边界 |
 | [资讯 / 情报源](intelligence-sources.md) | RSS/Atom 合规资讯源配置、测试、拉取、去重、存储、查询与安全边界 |
 | [分析上下文包契约、运行态消费与可见性](analysis-context-pack.md) | AnalysisContextPack 首版范围、字段质量状态、P1/P2 内部契约、P3 Prompt 摘要消费、P4 历史/API/Web 低敏可见性、P5 数据质量评分、P6 迁移回滚与源码锚点；完整指南补充 #1386 阶段感知分析、迁移与回滚入口 |
 | [图片识别 Prompt](image-extract-prompt.md) | 图片识别股票信息的 Prompt 与使用边界 |

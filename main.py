@@ -63,6 +63,13 @@ if _packaged_import_probe:
                 close = getattr(engine, "close", None)
                 if callable(close):
                     close()
+        elif _packaged_import_probe == "src.agent.factory":
+            # Build the agent tool registry so tool modules that read package
+            # data at import time (e.g. the FXMacroData operation catalogue)
+            # are exercised in the frozen artifact.
+            registry = probe_module.get_tool_registry()
+            if not any(name.startswith("fxmacrodata_") for name in registry.list_names()):
+                raise RuntimeError("FXMacroData tools are missing from the agent tool registry")
     except Exception as exc:
         print(
             f"ERROR: packaged runtime probe failed for {_packaged_import_probe}: {exc}",
@@ -303,6 +310,7 @@ def parse_arguments() -> argparse.Namespace:
   python main.py --single-notify    # 启用单股推送模式（每分析完一只立即推送）
   python main.py --schedule         # 启用定时任务模式
   python main.py --market-review    # 仅运行大盘复盘
+  python main.py --etf-rotation     # ETF 轮动：最新信号 + 规则回测报告
         '''
     )
 
@@ -455,6 +463,13 @@ def parse_arguments() -> argparse.Namespace:
         '--backtest-force',
         action='store_true',
         help='强制回测（即使已有回测结果也重新计算）'
+    )
+
+    # === ETF Rotation ===
+    parser.add_argument(
+        '--etf-rotation',
+        action='store_true',
+        help='运行 ETF 轮动：输出最新调仓信号与规则回测报告（不调用 LLM，配置见 ETF_ROTATION_*）'
     )
 
     return parser.parse_args()
@@ -789,6 +804,7 @@ def run_full_analysis(
     *,
     raise_errors: bool = False,
     analysis_targets: Optional[List[AnalysisTarget]] = None,
+    refresh_watchlist: bool = True,
 ) -> bool:
     """
     执行完整的分析流程（个股 + 大盘复盘）
@@ -797,6 +813,7 @@ def run_full_analysis(
     ``raise_errors`` 只控制持仓解析成功后的分析流程异常语义。
     ``analysis_targets`` 与 ``stock_codes`` 对齐，携带结构化分析目标
     （指数目标用于推导 market=cn 与能力矩阵）。
+    ``refresh_watchlist=False`` 仅用于已原子认领的定时快照，避免认领后再次热更新。
     """
     # Portfolio resolution is its own CLI contract boundary. A broker import
     # failure must reach the one-shot caller, while all later work keeps the
@@ -834,7 +851,7 @@ def run_full_analysis(
             analysis_targets = None
 
         # Issue #529: Hot-reload STOCK_LIST from .env on each scheduled run
-        if stock_codes is None and portfolio_stock_codes is None:
+        if stock_codes is None and portfolio_stock_codes is None and refresh_watchlist:
             config.refresh_stock_list()
 
         using_config_stock_list = stock_codes is None and portfolio_stock_codes is None
@@ -1228,7 +1245,18 @@ def run_scheduled_analysis(
     stock_codes: Optional[List[str]] = None,
 ) -> bool:
     """Run scheduled analysis with failures propagated to the scheduler."""
-    return run_full_analysis(config, args, stock_codes, raise_errors=True)
+    scheduled_for = getattr(args, "_scheduled_for", None)
+    if scheduled_for is None:
+        return run_full_analysis(config, args, stock_codes, raise_errors=True)
+
+    from src.services.scheduled_analysis_claim import run_claimed_scheduled_analysis
+
+    return run_claimed_scheduled_analysis(
+        config, args, scheduled_for,
+        lambda snapshot: run_full_analysis(
+            snapshot, args, stock_codes, raise_errors=True, refresh_watchlist=False,
+        ),
+    )
 
 
 def _run_analysis_with_runtime_scheduler_lock(
@@ -1421,7 +1449,7 @@ def _skips_stock_entry(args: argparse.Namespace, config: Config) -> bool:
     ``--stocks``/``STOCK_LIST`` tokens nor refresh the stock-index registry
     before the mode dispatch, otherwise an unsupported index token would
     wrongly block a run that never consumes it. Covered modes:
-    ``--backtest``, ``--market-review``, ``--serve-only``/``--webui-only``,
+    ``--backtest``, ``--market-review``, ``--etf-rotation``, ``--serve-only``/``--webui-only``,
     ``--portfolio`` (any value) and ``--schedule``/``config.schedule_enabled``.
     ``--serve`` (not serve-only) and plain one-shot runs still consume the
     stock list and stay outside the guard. The webui-only flag is read
@@ -1430,6 +1458,7 @@ def _skips_stock_entry(args: argparse.Namespace, config: Config) -> bool:
     """
     return bool(
         getattr(args, "backtest", False)
+        or getattr(args, "etf_rotation", False)
         or getattr(args, "market_review", False)
         or getattr(args, "serve_only", False)
         or getattr(args, "webui_only", False)
@@ -1728,6 +1757,18 @@ def main() -> int:
             )
             return 0
 
+        # 模式0.5: ETF 轮动（规则化，不调用 LLM）
+        if getattr(args, 'etf_rotation', False):
+            logger.info("模式: ETF 轮动")
+            from src.services.etf_rotation_service import run_etf_rotation
+
+            report = run_etf_rotation(config, send_notification=not args.no_notify)
+            logger.info(
+                "ETF 轮动完成: as_of=%s target=%s failed=%s",
+                f"{report.as_of:%Y-%m-%d}", report.target_weights, list(report.failed_codes),
+            )
+            return 0
+
         # 模式1: 仅大盘复盘
         if args.market_review:
             from src.core.market_review import run_market_review
@@ -1797,9 +1838,21 @@ def main() -> int:
             schedule_time_provider = _build_schedule_time_provider(config.schedule_time)
             schedule_times_provider = _build_schedule_times_provider(config.schedule_time)
 
-            def scheduled_task():
+            def scheduled_task(scheduled_for=None):
                 runtime_config = _reload_runtime_config()
-                result = run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                if scheduled_for is None:
+                    result = run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                else:
+                    from src.services.scheduled_analysis_claim import ScheduledAnalysisSkipped
+
+                    scheduled_args = argparse.Namespace(**vars(args))
+                    scheduled_args._scheduled_for = scheduled_for
+                    try:
+                        result = run_scheduled_analysis(runtime_config, scheduled_args, scheduled_stock_codes)
+                    except ScheduledAnalysisSkipped:
+                        logger.info("Scheduled analysis already claimed; skipping occurrence %s", scheduled_for)
+                        return
+
                 if result is False:
                     reason = _LAST_ANALYSIS_FAILURE_REASON or "unknown"
                     raise RuntimeError(
@@ -1832,6 +1885,7 @@ def main() -> int:
                 "run_immediately": should_run_immediately,
                 "background_tasks": background_tasks,
                 "schedule_time_provider": schedule_time_provider,
+                "pass_scheduled_for": True,
             }
             if hasattr(config, "schedule_times"):
                 schedule_kwargs["schedule_times"] = config.schedule_times

@@ -162,6 +162,11 @@ Go to your forked repo → `Settings` → `Secrets and variables` → `Actions` 
 | `TUSHARE_TOKEN` | [Tushare Pro](https://tushare.pro/weborder/#/login?reg=834638) Token | Optional |
 | `TUSHARE_HTTP_URL` | Tushare Pro HTTP endpoint; when unset/empty defaults to the official `http://api.tushare.pro`. Set to a `http://` or `https://` URL only when routing through a corporate proxy, cross-border network, or a self-hosted mirror | Optional |
 | `TICKFLOW_API_KEY` | [TickFlow](https://tickflow.org) API key for optional A-share daily K-lines, realtime quotes, stock list/name lookup, and CN market review enhancement; permission or entitlement failures fall back to existing providers | Optional |
+| `MX_APIKEY` / `MX_PRIORITY` | MiaoXiang (Eastmoney MX_API) supplementary provider: fills chip distribution and per-stock capital flow when public eastmoney endpoints fail or are rate-limited. **Strictly opt-in third-party capability**: requires a user-provided key (MiaoXiang Skills page); the current free-tier/quota policy may change and long-term free availability is not guaranteed. Not configured = no behavior change. `MX_PRIORITY` defaults to `6`. GitHub Actions requires `MX_APIKEY` in Secrets | Optional |
+
+MiaoXiang chip/flow methods share a network-admission lock across instances in one process. When a query reaches this boundary while another request is running, it is skipped instead of waiting on that lock. Capital-flow timeout quarantine lasts until the actual background worker exits, while other providers remain eligible for fallback. This does not cancel an already dispatched request or change the manager’s existing serialization of chip calls. Capability checks exclude this provider from all daily-data routes, and table selection/row parsing share dictionary/list `nameMap` normalization.
+
+MiaoXiang capital flow uses explicit main net-inflow amount metrics only; closing prices, ratios, and missing amounts are never substituted as currency values. A missing latest-day amount stays unknown, and a 5/10-day window with missing amounts emits no total rather than backfilling earlier dates.
 
 > **GitHub Actions:** The bundled `00-daily-analysis.yml` maps `TUSHARE_TOKEN`, `TICKFLOW_API_KEY` / `TICKFLOW_*`, and the documented `LONGBRIDGE_*` variables into the job environment. Store `TICKFLOW_API_KEY` in **Secrets**; non-sensitive TickFlow priority, adjustment, and batch switches can live in **Variables** or **Secrets**. Longbridge OAuth still requires a client id plus `LONGBRIDGE_OAUTH_TOKEN_CACHE_B64` for headless Actions runs, while the legacy `LONGBRIDGE_APP_KEY` / `LONGBRIDGE_APP_SECRET` / `LONGBRIDGE_ACCESS_TOKEN` triplet remains supported.
 
@@ -651,6 +656,7 @@ python scripts/check_env.py --config
 ```bash
 python main.py                        # Full analysis (stocks + market review)
 python main.py --market-review        # Market review only
+python main.py --etf-rotation         # ETF rotation signal + rule backtest (no LLM; see docs/etf-rotation.md, Chinese-only)
 python main.py --no-market-review     # Stock analysis only
 python main.py --stocks 600519,300750 # Specify stocks
 python main.py --portfolio futu       # Use real Futu LONG stock holdings (overrides --stocks/STOCK_LIST)
