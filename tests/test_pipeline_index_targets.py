@@ -719,7 +719,10 @@ class PipelineBatchFailureIsolationTestCase(unittest.TestCase):
             call.args[0] for call in pipeline.process_single_stock.call_args_list
         }
         self.assertEqual(submitted_codes, set(supported_codes))
-        self.assertEqual(results, [])
+        # 方案1（失败保留占位块）契约：未成功的目标不再被静默丢弃，而是以
+        # success=False 的占位块返回，使报告股票数恒等于 STOCK_LIST 长度。
+        self.assertEqual(len(results), len(supported_codes))
+        self.assertTrue(all(not result.success for result in results))
 
 
 class PipelineDryRunTestCase(unittest.TestCase):
