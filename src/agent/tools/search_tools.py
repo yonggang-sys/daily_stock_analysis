@@ -190,6 +190,10 @@ def _handle_search_comprehensive_intel(stock_code: str, stock_name: str) -> dict
     if not service.is_available:
         return {"error": "No search engine available (no API keys configured)"}
 
+    # 注意：此处的 6 与 src/core/pipeline.py 的 max_searches=2 不同，是有意为之。
+    # 本文件属 Agent 工具路径（agent_mode 默认 False，日报实际走 pipeline.py 那条），
+    # 且 tests/test_search_tools_persistence.py 断言此处为 6（与上游对齐）。
+    # 调小会直接让该用例失败；要调整日报的检索维度数，请改 pipeline.py，不要改这里。
     intel_results = service.search_comprehensive_intel(
         stock_code=query_code,
         stock_name=query_name,
