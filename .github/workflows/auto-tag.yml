@@ -15,7 +15,7 @@ on:
 
 jobs:
   tag:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Default: NO tag. Only tag when commit message contains #patch, #minor, or #major.
     if: >-
       contains(github.event.head_commit.message, '#patch') ||
