@@ -53,7 +53,7 @@ concurrency:
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # 兼容误将 STOCK_LIST 配到同名 Environment variables 的场景；
     # 推荐位置仍是 Settings -> Secrets and variables -> Actions -> Repository variables。
     environment: STOCK_LIST
@@ -865,7 +865,7 @@ jobs:
           fi
 
   notify-on-failure:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: analyze
     if: failure()
     steps:
