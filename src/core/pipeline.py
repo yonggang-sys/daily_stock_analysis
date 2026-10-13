@@ -678,7 +678,7 @@ class StockAnalysisPipeline:
                     analysis_target=analysis_target,
                 )
 
-            # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
+            # Step 4: 多维度情报搜索（实际覆盖维度数由下方 max_searches 决定，当前=2）
             news_context = None
             persisted_intelligence_context = self._load_persisted_intelligence_context(
                 code=code,
@@ -695,7 +695,17 @@ class StockAnalysisPipeline:
                 # 反而不会提示。
                 news_result_count = 0
 
-                # 使用多维度搜索（最多2次搜索，省 Tavily 等按次计费额度）
+                # 使用多维度搜索。max_searches=2 是有意的降本设置（commit 3342c279），
+                # 限的是 Tavily 等搜索引擎的按次计费额度，与 LLM / Gemini 配额无关。
+                # A 股维度顺序：① 最新消息 ② 机构分析 ③ 风险排查 ④ 公司公告
+                # ⑤ 业绩预期 ⑥ 行业分析。=2 时只跑 ①②，③④⑤⑥ 不检索
+                # （即减持/处罚/诉讼等利空、公司公告、业绩预告、行业现状均不搜索）。
+                # 若要扩维度请改本处数值；每日成本 = 股票数 × 维度数 × 运行次数。
+                #
+                # 注意：src/agent/tools/search_tools.py 中同为 search_comprehensive_intel
+                # 却传 6，两者不同是有意为之——那边是 Agent 工具路径（agent_mode 默认
+                # 关闭，日报不走该路径），且测试断言其为 6（与上游一致）。勿统一。
+                #
                 # 指数目标：查询 subject 仅用注册表中文名称，不把 canonical code /
                 # 六码机器码带入查询（Story 1.5 V7）。
                 intel_results = self.search_service.search_comprehensive_intel(
