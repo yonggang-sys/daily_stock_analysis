@@ -678,7 +678,28 @@ class StockAnalysisPipeline:
                     analysis_target=analysis_target,
                 )
 
-            # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
+            # Step 4: 多维度情报搜索
+            #
+            # 【max_searches=2 是有意的降本设置，不是 bug】
+            # 来源：commit 3342c279「降 max_searches 5/6/3->2 以省 Tavily 按次额度」。
+            # 它限的是 Tavily 等**搜索引擎**的按次计费额度，与 LLM / Gemini 配额无关。
+            #
+            # A 股维度顺序（src/search_service.py）：
+            #   ① 最新消息 ② 机构分析 ③ 风险排查 ④ 公司公告 ⑤ 业绩预期 ⑥ 行业分析
+            # =2 时只跑 ①②，即 ③④⑤⑥ 不检索 —— 减持/处罚/诉讼等利空、公司公告、
+            # 业绩预告、行业现状都不会进入 prompt。这是刻意接受的取舍。
+            # 若要扩维度，改下方 max_searches；日成本 = 股票数 × 维度数 × 运行次数。
+            #
+            # 【与 src/agent/tools/search_tools.py 的 max_searches=6 不同，是有意为之】
+            # 那边是 Agent 工具路径（agent_mode 默认 False，日报不走该路径），
+            # 且 tests/test_search_tools_persistence.py 断言其为 6（对齐上游）。
+            # 调整日报维度数请改本文件，不要统一两处取值。
+            #
+            # 【勿在下方 logger 行起的 600 字符内插长注释】
+            # tests/test_notification_empty_news_disclosure.py 以该 logger 的文案为
+            # 起点取固定 600 字符窗口做断言，长注释会把检索调用挤出窗口导致用例失败。
+            # 另：本注释也**不可原样抄写该 logger 文案**，否则 src.index() 会先命中
+            # 注释、窗口起点被挪走，同样触发失败。
             news_context = None
             persisted_intelligence_context = self._load_persisted_intelligence_context(
                 code=code,
@@ -696,6 +717,7 @@ class StockAnalysisPipeline:
                 news_result_count = 0
 
                 # 使用多维度搜索（最多2次搜索，省 Tavily 等按次计费额度）
+                # ⚠ 本处起 600 字符被上游测试取窗口断言，勿插长注释（见 Step 4 说明）。
                 # 指数目标：查询 subject 仅用注册表中文名称，不把 canonical code /
                 # 六码机器码带入查询（Story 1.5 V7）。
                 intel_results = self.search_service.search_comprehensive_intel(
