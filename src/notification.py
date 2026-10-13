@@ -1215,9 +1215,11 @@ class NotificationService(
         report_language: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         language = report_language or self._get_report_language(results)
+        # 失败占位块（success=False）不计入买卖统计，仅展示在报告中提示用户。
         buckets = [
             display_decision_type_for_result(result, report_language=language)
             for result in results
+            if getattr(result, "success", True)
         ]
         buy_count = sum(1 for bucket in buckets if bucket == "buy")
         sell_count = sum(1 for bucket in buckets if bucket == "sell")
@@ -1309,11 +1311,14 @@ class NotificationService(
 
         buy_count, sell_count, hold_count = self._count_display_decisions(results, report_language)
 
+        failed_count = sum(1 for r in results if not getattr(r, "success", True))
         report_lines = [
             f"# 🎯 {report_date} {labels['dashboard_title']}",
             "",
             f"> {labels['analyzed_prefix']} **{len(results)}** {labels['stock_unit']} | "
-            f"🟢{labels['buy_label']}:{buy_count} 🟡{labels['watch_label']}:{hold_count} 🔴{labels['sell_label']}:{sell_count}",
+            f"🟢{labels['buy_label']}:{buy_count} 🟡{labels['watch_label']}:{hold_count} "
+            f"🔴{labels['sell_label']}:{sell_count}"
+            + (f" | ⚠️失败:{failed_count}" if failed_count else ""),
         ]
         self._append_market_status_line(report_lines, results, report_language)
 
@@ -1324,8 +1329,14 @@ class NotificationService(
                 "",
             ])
             for r in sorted_results:
-                signal_text, signal_emoji, _ = self._get_signal_level(r)
                 display_name = self._get_display_name(r, report_language)
+                # 方案1：失败占位块在摘要中也以 ⚠️ 标识，一眼可见哪只未出。
+                if not getattr(r, "success", True):
+                    report_lines.append(
+                        f"⚠️ **{display_name}({r.code})**: 分析失败（未纳入 AI 研判）"
+                    )
+                    continue
+                signal_text, signal_emoji, _ = self._get_signal_level(r)
                 report_lines.append(
                     f"{signal_emoji} **{display_name}({r.code})**: "
                     f"{signal_text} | "
@@ -1346,6 +1357,21 @@ class NotificationService(
         # 逐个股票的决策仪表盘（Issue #262: summary_only 时跳过详情）
         if not self._report_summary_only:
             for result in sorted_results:
+                stock_name = self._get_display_name(result, report_language)
+                # 方案1：失败占位块——恒显示该股票，标注分析失败原因，不再静默丢弃。
+                if not getattr(result, "success", True):
+                    report_lines.extend([
+                        f"## ⚠️ {stock_name} ({result.code})",
+                        "",
+                        f"⚠️ **分析失败，未纳入 AI 研判**：{result.error_message or '未知原因'}",
+                        "",
+                        "> 本报告按 STOCK_LIST 恒等展示全部标的；失败仅因本次 LLM 调用异常"
+                        "（如 Gemini 限流），不代表标的本身异常，下一周期通常会自动恢复。",
+                        "",
+                        "---",
+                        "",
+                    ])
+                    continue
                 signal_text, signal_emoji, signal_tag = self._get_signal_level(result)
                 dashboard = result.dashboard if hasattr(result, 'dashboard') and result.dashboard else {}
 
@@ -1654,12 +1680,14 @@ class NotificationService(
         sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
 
         buy_count, sell_count, hold_count = self._count_display_decisions(results, report_language)
+        failed_count = sum(1 for r in results if not getattr(r, "success", True))
 
         lines = [
             f"## 🎯 {report_date} {labels['dashboard_title']}",
             "",
             f"> {len(results)} {labels['stock_unit']} | "
-            f"🟢{labels['buy_label']}:{buy_count} 🟡{labels['watch_label']}:{hold_count} 🔴{labels['sell_label']}:{sell_count}",
+            f"🟢{labels['buy_label']}:{buy_count} 🟡{labels['watch_label']}:{hold_count} 🔴{labels['sell_label']}:{sell_count}"
+            + (f" | ⚠️失败:{failed_count}" if failed_count else ""),
         ]
         self._append_market_status_line(lines, results, report_language)
 
@@ -1668,6 +1696,11 @@ class NotificationService(
             lines.append(f"**📊 {labels['summary_heading']}**")
             lines.append("")
             for r in sorted_results:
+                # 方案1：失败占位块在微信摘要中也以 ⚠️ 标识。
+                if not getattr(r, "success", True):
+                    stock_name = self._get_display_name(r, report_language)
+                    lines.append(f"⚠️ **{stock_name}({r.code})**: 分析失败（未纳入 AI 研判）")
+                    continue
                 signal_text, signal_emoji, _ = self._get_signal_level(r)
                 stock_name = self._get_display_name(r, report_language)
                 lines.append(
@@ -1681,6 +1714,16 @@ class NotificationService(
                     lines.append(news_disclosure)
         else:
             for result in sorted_results:
+                stock_name = self._get_display_name(result, report_language)
+                # 方案1：失败占位块——恒显示该股票，标注分析失败原因。
+                if not getattr(result, "success", True):
+                    lines.extend([
+                        f"### ⚠️ **分析失败** | {stock_name}({result.code})",
+                        "",
+                        f"⚠️ 分析失败（未纳入 AI 研判）：{result.error_message or '未知原因'}",
+                        "",
+                    ])
+                    continue
                 signal_text, signal_emoji, _ = self._get_signal_level(result)
                 dashboard = result.dashboard if hasattr(result, 'dashboard') and result.dashboard else {}
                 core = dashboard.get('core_conclusion', {}) if dashboard else {}
@@ -1927,13 +1970,22 @@ class NotificationService(
             return f"# {report_date} {labels['brief_title']}\n\n{labels['no_results']}"
         sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
         buy_count, sell_count, hold_count = self._count_display_decisions(results, report_language)
+        failed_count = sum(1 for r in results if not getattr(r, "success", True))
         lines = [
             f"# {report_date} {labels['brief_title']}",
             "",
-            f"> {len(results)} {labels['stock_unit_compact']} | 🟢{buy_count} 🟡{hold_count} 🔴{sell_count}",
+            f"> {len(results)} {labels['stock_unit_compact']} | 🟢{buy_count} 🟡{hold_count} 🔴{sell_count}"
+            + (f" | ⚠️失败:{failed_count}" if failed_count else ""),
         ]
         self._append_market_status_line(lines, results, report_language)
         for r in sorted_results:
+            # 方案1：失败占位块在简报中也以 ⚠️ 标识，不再静默消失。
+            if not getattr(r, "success", True):
+                name = self._get_display_name(r, report_language)
+                lines.append(
+                    f"⚠️ **{name}({r.code})** 分析失败（未纳入 AI 研判）：{r.error_message or '未知原因'}"
+                )
+                continue
             signal_text, emoji, _ = self._get_signal_level(r)
             name = self._get_display_name(r, report_language)
             dash = r.dashboard or {}

@@ -3394,7 +3394,29 @@ class StockAnalysisPipeline:
         finally:
             reset_run_diagnostic_context(diag_token)
             reset_frozen_target_date(token)
-    
+
+    def _make_failure_placeholder(
+        self, code: str, name: Optional[str], reason: str
+    ) -> "AnalysisResult":
+        """构造一只分析失败的占位结果，使每日报告恒包含该股票块。
+
+        返回的 AnalysisResult 的 success=False，报告渲染层据此输出 ⚠️ 失败提示
+        而非正常研判，从而让报告股票数恒定等于 STOCK_LIST 长度，且一眼可见哪只未出。
+        """
+        display_name = name or f"股票{code}"
+        return AnalysisResult(
+            code=code,
+            name=display_name,
+            sentiment_score=0,
+            trend_prediction="",
+            operation_advice="",
+            report_language="zh",
+            success=False,
+            error_message=reason,
+            analysis_summary=f"⚠️ 分析失败（未纳入 AI 研判）：{reason}",
+            dashboard=None,
+        )
+
     def run(
         self,
         stock_codes: Optional[List[str]] = None,
@@ -3557,10 +3579,21 @@ class StockAnalysisPipeline:
                                 report_type=report_type,
                                 fallback_code=code,
                             )
-                    elif result and not result.success:
+                    else:
+                        # 方案1：分析失败（或任务异常无结果）时保留占位块，
+                        # 使每日报告的股票数恒等于 STOCK_LIST 长度，且一眼可见哪只未出。
+                        if result is None:
+                            fail_reason = "任务执行异常（未返回分析结果）"
+                            fail_name = None
+                        else:
+                            fail_reason = result.error_message or "未知原因"
+                            fail_name = getattr(result, "name", None)
+                        placeholder = self._make_failure_placeholder(
+                            code, fail_name, fail_reason
+                        )
+                        results.append(placeholder)
                         logger.warning(
-                            f"[{code}] 分析结果标记为失败，不计入汇总: "
-                            f"{result.error_message or '未知原因'}"
+                            f"[{code}] 分析未成功，已保留失败占位块（不计入研判统计）: {fail_reason}"
                         )
 
                     # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
@@ -3574,6 +3607,12 @@ class StockAnalysisPipeline:
 
                 except Exception as e:
                     logger.error(f"[{code}] 任务执行失败: {e}")
+                    # 兜底：线程抛异常（future.result 抛错）也保留占位块，
+                    # 避免报告漏掉该标的导致数量飘忽。
+                    placeholder = self._make_failure_placeholder(
+                        code, None, f"任务执行异常: {e}"
+                    )
+                    results.append(placeholder)
         
         # 统计
         elapsed_time = time.time() - start_time
@@ -3599,7 +3638,8 @@ class StockAnalysisPipeline:
                     success_count += 1
             fail_count = len(stock_codes) - success_count
         else:
-            success_count = len(results)
+            # 失败占位块（success=False）不计入“成功”统计，仅计入尝试的股票总数。
+            success_count = sum(1 for r in results if getattr(r, "success", False))
             fail_count = len(stock_codes) - success_count
         
         logger.info("===== 分析完成 =====")
