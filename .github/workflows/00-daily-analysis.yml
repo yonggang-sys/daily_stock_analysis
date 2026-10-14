@@ -89,6 +89,16 @@ jobs:
           fi
           GEN=$(python3 -c "import json,sys;d=json.load(open('/tmp/lm.json'));print(d.get('generated_at',''))" 2>/dev/null || true)
           if [ -z "$GEN" ]; then echo "ℹ️ meta 无 generated_at，完整运行"; exit 0; fi
+          # 2026-10-14(H-24)：手动 workflow_dispatch（验证/补跑）写入的 meta 不参与调度去重。
+          # 原逻辑只比时间戳，导致一次 stocks-only 手动验证 run 于 15:09 发布报告后，
+          # 15:30 收盘定时 run 被判「本时段已有新鲜报告」直接跳过主分析，收盘报告因此缺失大盘复盘。
+          # 手动 run 标记 trigger=workflow_dispatch，调度 run 见即放行；老 meta 无 trigger 字段时
+          # .get 返回空串 → 走原时间戳逻辑（向后兼容）。
+          TRIG=$(python3 -c "import json,sys;d=json.load(open('/tmp/lm.json'));print(d.get('trigger',''))" 2>/dev/null || true)
+          if [ "$TRIG" = "workflow_dispatch" ]; then
+            echo "🖐️ meta 来自手动触发(trigger=workflow_dispatch)，不参与调度去重，完整运行"
+            exit 0
+          fi
           GEN_DAY=${GEN:0:10}
           GEN_TS=$(TZ='Asia/Shanghai' date -d "${GEN}" +%s 2>/dev/null || echo 0)
           DIFF=$(( (NOW - GEN_TS) / 60 ))
@@ -799,18 +809,20 @@ jobs:
           # 发布 LLM 报告（若有）
           if [ -n "$LATEST" ]; then
             cp "$LATEST" reports/latest.md
-            printf '{"generated_at":"%s","model":"%s","run_number":"%s","source":"%s"}\n' \
+            printf '{"generated_at":"%s","model":"%s","run_number":"%s","source":"%s","trigger":"%s"}\n' \
               "$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" \
               "${CI_MODEL}" \
               "${{ github.run_number }}" \
-              "$LATEST" > reports/latest.meta.json
+              "$LATEST" \
+              "${{ github.event_name }}" > reports/latest.meta.json
           else
             # 零 LLM 模式：用当前时间生成 meta，标记无 LLM 模型
-            printf '{"generated_at":"%s","model":"%s","run_number":"%s","source":"%s"}\n' \
+            printf '{"generated_at":"%s","model":"%s","run_number":"%s","source":"%s","trigger":"%s"}\n' \
               "$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" \
               "n/a(ci-emit-only)" \
               "${{ github.run_number }}" \
-              "ci_emit" > reports/latest.meta.json
+              "ci_emit" \
+              "${{ github.event_name }}" > reports/latest.meta.json
           fi
 
           # H-23(2026-09-30)：大盘复盘单独发布——本地仪表盘「AI 复盘报告」七章节消费此文件。
