@@ -2903,6 +2903,96 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertTrue(validation["valid"])
         self.assertEqual(validation["issues"], [])
 
+    def test_minimal_modelflare_config_is_valid_and_ready_without_persisting_defaults(self) -> None:
+        self._rewrite_env(
+            "MODELFLARE_KEY=sk-test",
+            "STOCK_LIST=600519",
+        )
+        before = self.env_path.read_text(encoding="utf-8")
+        with patch.dict(os.environ, {}, clear=True):
+            validation = self.service.validate(items=[])
+            status = self.service.get_setup_status()
+            models = self.service._collect_llm_channel_models_from_map(self.manager.read_config_map())
+            self.assertTrue(self.service.preview_generation_backend_status(items=[])["primary"]["available"])
+            item = next(item for item in self.service.get_config()["items"] if item["key"] == "MODELFLARE_KEY")
+            self.assertTrue(item["schema"]["is_sensitive"])
+        self.assertTrue(validation["valid"], validation["issues"])
+        self.assertTrue(status["is_complete"])
+        self.assertEqual(models, ["openai/gpt-6.1-sol"])
+        self.assertEqual(self.env_path.read_text(encoding="utf-8"), before)
+
+    def test_modelflare_one_key_runtime_display_and_draft_validation_do_not_persist(self) -> None:
+        self._rewrite_env("STOCK_LIST=600519")
+        before = self.env_path.read_text(encoding="utf-8")
+        with patch.dict(os.environ, {"MODELFLARE_KEY": "sk-test"}, clear=True):
+            config = self.service.get_config()
+            items = {item["key"]: item for item in config["items"]}
+            self.assertEqual(items["MODELFLARE_KEY"]["value"], "sk-test")
+            self.assertFalse(items["MODELFLARE_KEY"]["raw_value_exists"])
+            self.assertTrue(items["MODELFLARE_KEY"]["schema"]["is_sensitive"])
+            self.assertTrue(self.service.preview_generation_backend_status(items=[])["primary"]["available"])
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(self.service.validate(items=[{"key": "MODELFLARE_KEY", "value": "sk-draft"}])["valid"])
+            self.assertTrue(self.service.preview_generation_backend_status(
+                items=[{"key": "MODELFLARE_KEY", "value": "sk-draft"}],
+            )["primary"]["available"])
+        self.assertEqual(self.env_path.read_text(encoding="utf-8"), before)
+
+    @patch("litellm.completion")
+    def test_modelflare_existing_primary_model_supports_validation_preview_and_connection(self, completion) -> None:
+        self._rewrite_env(
+            "LLM_CHANNELS=modelflare", "LLM_MODELFLARE_API_KEY=sk-test",
+            "LITELLM_MODEL=openai/account-model", "LITELLM_FALLBACK_MODELS=openai/fallback-model",
+            "STOCK_LIST=600519",
+        )
+        before = self.env_path.read_text(encoding="utf-8")
+        completion.return_value = self._mock_completion_response()
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(self.service.validate(items=[])["valid"])
+            self.assertTrue(self.service.get_setup_status()["is_complete"])
+            self.assertTrue(self.service.preview_generation_backend_status(items=[])["primary"]["available"])
+            invalid = self.service.validate(items=[
+                {"key": "LITELLM_FALLBACK_MODELS", "value": "deepseek/other-model"},
+            ])
+            self.assertFalse(invalid["valid"])
+            self.assertTrue(any(issue["code"] == "unknown_model" for issue in invalid["issues"]))
+            result = self.service.test_llm_channel(
+                name="modelflare", protocol="openai", base_url="", api_key="sk-test", models=[],
+            )
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["resolved_model"], "openai/account-model")
+        self.assertEqual(completion.call_args.kwargs["api_base"], "https://modelflare.dev/v1")
+        self.assertEqual(self.env_path.read_text(encoding="utf-8"), before)
+
+    @patch("litellm.completion")
+    @patch("src.services.system_config_service.requests.get")
+    def test_modelflare_discovery_and_connection_apply_default_endpoint(self, get, completion) -> None:
+        get.return_value = SimpleNamespace(
+            ok=True, status_code=200, json=lambda: {"data": [{"id": "account-model"}]},
+        )
+        completion.return_value = self._mock_completion_response()
+        for base_url in ("", "https://custom.example/v1"):
+            with self.subTest(base_url=base_url):
+                request = dict(name="modelflare", protocol="", base_url=base_url,
+                               api_key="sk-test", models=["account-model"])
+                discovery = self.service.discover_llm_channel_models(**request)
+                connection = self.service.test_llm_channel(**request)
+                expected = base_url or "https://modelflare.dev/v1"
+                self.assertTrue(discovery["success"], discovery)
+                self.assertTrue(connection["success"], connection)
+                self.assertEqual(get.call_args.args[0], expected + "/models")
+                self.assertEqual(completion.call_args.kwargs["api_base"], expected)
+
+    @patch("litellm.completion")
+    @patch("src.services.system_config_service.requests.get")
+    def test_modelflare_explicit_invalid_endpoint_is_not_replaced(self, get, completion) -> None:
+        request = dict(name="modelflare", protocol="", base_url="http://169.254.169.254/v1",
+                       api_key="sk-test", models=["account-model"])
+        self.assertFalse(self.service.discover_llm_channel_models(**request)["success"])
+        self.assertFalse(self.service.test_llm_channel(**request)["success"])
+        get.assert_not_called()
+        completion.assert_not_called()
+
     def test_validate_treats_blank_anspire_channel_enabled_as_shared_disable(self) -> None:
         validation = self.service.validate(
             items=[

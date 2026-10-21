@@ -128,22 +128,7 @@ Web 启用步骤：打开「设置 → Agent 设置 → 问股生成方式」，
 
 如果你只打算用一种模型，这是最快捷的办法。打开项目根目录下的 `.env` 文件（如果没有，复制一份 `.env.example` 并重命名为 `.env`）。
 
-### Anspire Open 示例：
-
-> 💡 **推荐 [Anspire Open](https://open.anspire.cn/dsa?share_code=QFBC0FYC)**：支持中文优化的联网搜索与 OpenAI-compatible 路径一体化体验，适合只准备一个 Key 的用户。
-> - 以下为配置示例，模型与网关可用性以账号权限和 Anspire 控制台为准；文档示例不替代实际连通性验证。
-> - 建议在 Web 设置页点击“测试连接”进行实际鉴权与模型可用性检查，避免以文档默认值直接当作可用性承诺。
-
-```env
-# Anspire Open API Keys（支持多个，逗号分隔）
-# 获取: https://open.anspire.cn/dsa?share_code=QFBC0FYC
-# 满足默认优先级条件时，系统会复用该 Key 处理搜索与 LLM（仅限示例兜底路径）。
-# 示例模型：Doubao-Seed-2.0-lite；示例网关：https://open-gateway.anspire.cn/v6
-ANSPIRE_API_KEYS=sk-xxxxxxxxxxxxxxxx
-# 可选：按控制台可用性切换模型或网关
-# ANSPIRE_LLM_MODEL=Doubao-Seed-2.0-pro
-# ANSPIRE_LLM_BASE_URL=https://open-gateway.anspire.ai/v6
-```
+Modelflare 使用标准 Channels 配置，见下方 [Modelflare 示例](#示例modelflare)。本节保留单模型 legacy 配置，现有配置无需迁移。
 
 ### 示例 1：使用通用第三方平台（兼容 OpenAI 格式，推荐）
 
@@ -180,6 +165,21 @@ LITELLM_MODEL=ollama/qwen3:8b
 ```
 
 > **重要**：Ollama 必须使用 `OLLAMA_API_BASE` 配置，**不要**使用 `OPENAI_BASE_URL`，否则系统会错误拼接 URL（如 404、`api/generate/api/show`）。远程 Ollama 时，将 `OLLAMA_API_BASE` 设为实际地址（如 `http://192.168.1.100:11434`）。当前依赖约束为 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0`（与 requirements.txt 一致）。
+
+### Anspire Open legacy 兼容示例
+
+现有 Anspire 搜索与 LLM 共用 Key 的兼容路径继续保留。以下为配置示例，模型与网关可用性以账号权限和 Anspire 控制台为准；可在 Web 设置页点击“测试连接”确认。
+
+```env
+# Anspire Open API Keys（支持多个，逗号分隔）
+# 获取: https://open.anspire.cn/dsa?share_code=QFBC0FYC
+# 满足默认优先级条件时，系统会复用该 Key 处理搜索与 LLM（仅限示例兜底路径）。
+# 示例模型：Doubao-Seed-2.0-lite；示例网关：https://open-gateway.anspire.cn/v6
+ANSPIRE_API_KEYS=sk-xxxxxxxxxxxxxxxx
+# 可选：按控制台可用性切换模型或网关
+# ANSPIRE_LLM_MODEL=Doubao-Seed-2.0-pro
+# ANSPIRE_LLM_BASE_URL=https://open-gateway.anspire.ai/v6
+```
 
 > **恭喜！小白读到这里就可以去运行程序了！**
 > 想测测看通没通？在主目录打开命令行输入：`python scripts/check_env.py --llm`
@@ -223,6 +223,7 @@ LITELLM_MODEL=ollama/qwen3:8b
 
 ### 常用官方文档来源（用于核对预设 provider / Base URL / 模型命名）
 
+- Modelflare：[快速开始](https://docs.modelflare.dev/quickstart/)、[接入端点](https://docs.modelflare.dev/guides/endpoints/)、[模型与分组](https://docs.modelflare.dev/guides/models-and-groups/)
 - OpenAI Compatible 规范（LiteLLM）：<https://docs.litellm.ai/docs/providers/openai_compatible>
 - OpenAI 官方：<https://platform.openai.com/docs/api-reference/chat>
 - DeepSeek 官方：<https://api-docs.deepseek.com/>
@@ -245,7 +246,25 @@ LITELLM_MODEL=ollama/qwen3:8b
 1. **先声明你有几个渠道**：`LLM_CHANNELS=渠道名称1,渠道名称2`
 2. **给每个渠道分别填写配置**（注意全大写）：`LLM_{渠道名}_XXX`
 
-### 示例：Anspire Responses API（GPT-5.6 名称为观测样本）
+### 示例：Modelflare
+
+[注册 Modelflare](https://modelflare.dev/sign-up?utm_source=github&utm_campaign=daily_stock_analysis)，在控制台创建 API Key 后配置：
+
+```env
+MODELFLARE_KEY=sk-xxx
+```
+
+只需填写 `MODELFLARE_KEY`，后端自动启用 Modelflare，默认地址为 `https://modelflare.dev/v1`、模型为 `openai/gpt-6.1-sol`，无需填写渠道名、地址或模型。显式 YAML 或 `LLM_CHANNELS` 优先，Modelflare 显式渠道 Key 优先于此简写；清空 Key 或禁用渠道即可停用。推导不改写已保存配置。
+
+只声明 `modelflare` 一个渠道且未填渠道模型列表时，未配置主模型时默认使用 `openai/gpt-6.1-sol`；配置主模型后，后端复用 `LITELLM_MODEL` 和带 `openai/` 前缀的备用模型；主模型使用 `openai/<模型名>`。显式 `LLM_MODELFLARE_MODELS` 优先，多渠道仍需分别声明模型。推导不改写已保存配置或模型选择。
+
+渠道名为 `modelflare` 时，未填写或留空的接入地址自动使用 `https://modelflare.dev/v1`；显式 `LLM_MODELFLARE_BASE_URL` 优先。该地址默认识别为 `openai` 协议，接口默认为 `chat_completions`；未设置 `LITELLM_MODEL` 时使用首个渠道模型。默认模型仍需账号有访问权限，不自动补充 API Key。
+
+`gpt-6.1-sol` 是本项目的 Modelflare 默认模型。请按账号权限选择实际可用模型，并通过 Web「获取模型」和「测试连接」确认；Base URL 不要附加 `/chat/completions`。Modelflare 是新建渠道的首选模板，已保存的渠道和主模型不会因模板顺序调整而改变。Anspire Search 仍通过 `ANSPIRE_API_KEYS` 独立配置。
+
+客户端快速添加按钮及渠道说明中的「Modelflare 专属注册」都使用 app UTM，README 使用 github UTM。新建渠道尚未填写 Key，或主模型/备用模型不属于当前启用渠道时，状态预览会提示「配置需要调整」并列出具体字段；补填 Key、选择可用模型或清空无效的备用模型后重试，预览不会自动改写已保存配置。
+
+### 兼容示例：Anspire Responses API（GPT-5.6 名称为观测样本）
 
 ```env
 LLM_CHANNELS=anspire
@@ -490,7 +509,7 @@ model_list:
 
 - 运行时选择：`GENERATION_BACKEND`、`GENERATION_FALLBACK_BACKEND`、`GENERATION_BACKEND_TIMEOUT_SECONDS`、`GENERATION_BACKEND_MAX_OUTPUT_BYTES`、`GENERATION_BACKEND_MAX_CONCURRENCY`、`LOCAL_CLI_BACKEND_MAX_CONCURRENCY`、`AGENT_GENERATION_BACKEND`、`LLM_CHANNELS`、`LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`AGENT_LITELLM_MODEL`、`VISION_MODEL`、`VISION_PROVIDER_PRIORITY`、`LLM_TEMPERATURE`、`LLM_USAGE_HMAC_SECRET`、`LLM_USAGE_HMAC_KEY_VERSION`、`LLM_PROMPT_CACHE_TELEMETRY_ENABLED`、`LLM_PROMPT_CACHE_HINTS_ENABLED`、`LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL`
 - 多 Key：`GEMINI_API_KEYS`、`ANTHROPIC_API_KEYS`、`OPENAI_API_KEYS`、`DEEPSEEK_API_KEYS`（当前 workflow 仅从 repository secrets 导入，不会读取同名 Variables）
-- 常用渠道名：`primary`、`secondary`、`aihubmix`、`deepseek`、`dashscope`、`zhipu`、`moonshot`、`minimax`、`volcengine`、`siliconflow`、`openrouter`、`requesty`、`gemini`、`anthropic`、`openai`、`ollama`
+- 常用渠道名：`modelflare`、`primary`、`secondary`、`aihubmix`、`anspire`、`deepseek`、`dashscope`、`zhipu`、`moonshot`、`minimax`、`volcengine`、`siliconflow`、`openrouter`、`requesty`、`gemini`、`anthropic`、`openai`、`ollama`、`hermes`
 
 例如在 GitHub Actions 中配置 `LLM_CHANNELS=primary,deepseek` 时，需同步配置 `LLM_PRIMARY_*` / `LLM_DEEPSEEK_*`。其中 `LLM_<NAME>_API_KEY` / `LLM_<NAME>_API_KEYS` 当前也仅从 repository secrets 导入；如果你把这些值放在 Variables，运行时不会生效。若使用自定义渠道名（如 `my_proxy`），GitHub Actions 还必须在 workflow `env:` 中显式新增对应的 `LLM_MY_PROXY_*` 映射；本地 `.env` 和 Docker 不受这个限制。
 

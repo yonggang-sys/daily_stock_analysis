@@ -121,22 +121,7 @@ Web setup: open **Settings → Agent → Ask-stock method**, choose **Codex loca
 
 If you only plan to use one single model, this is the fastest way. Open the `.env` file in the project's root directory (if it doesn't exist, copy `.env.example` and rename it to `.env`).
 
-### Anspire Open Example:
-
-> 💡 **[Anspire Open](https://open.anspire.cn/dsa?share_code=QFBC0FYC)**: supports Chinese-optimized search and OpenAI-compatible model access using a shared key.
-> - The following values are configuration examples only; model availability depends on your account and Anspire console.
-> - Documentation examples do not replace connectivity validation; please validate with the Web "Test connection" flow before relying on production traffic.
-
-```env
-# Anspire Open API keys (multiple keys supported, separated by commas)
-# Get your key at: https://open.anspire.cn/dsa?share_code=QFBC0FYC
-# When no higher-priority OpenAI-compatible source is set, this key is reused for Anspire search + LLM path (example fallback behavior only).
-# Example model: Doubao-Seed-2.0-lite; example gateway: https://open-gateway.anspire.cn/v6
-ANSPIRE_API_KEYS=sk-xxxxxxxxxxxxxxxx
-# Optional: switch example model or gateway according to your Anspire account and official docs.
-# ANSPIRE_LLM_MODEL=Doubao-Seed-2.0-pro
-# ANSPIRE_LLM_BASE_URL=https://open-gateway.anspire.ai/v6
-```
+Modelflare uses standard Channels configuration; see the [Modelflare example](#example-modelflare) below. This section retains single-model legacy configuration, and existing setups do not require migration.
 
 ### Example 1: Using a Third-party OpenAI-Compatible Platform (Highly Recommended)
 
@@ -173,6 +158,21 @@ LITELLM_MODEL=ollama/qwen3:8b
 ```
 
 > **Important**: Ollama must be configured with `OLLAMA_API_BASE`. **Do not** use `OPENAI_BASE_URL`, or the system will concatenate URLs incorrectly (e.g. 404, `api/generate/api/show`). For remote Ollama, set `OLLAMA_API_BASE` to the actual address (e.g. `http://192.168.1.100:11434`). Current dependency constraint is `litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0` (matches requirements.txt).
+
+### Anspire Open legacy compatibility example
+
+Existing Anspire setups that share a key between search and LLMs remain supported. These are configuration examples whose availability depends on your account and the Anspire console; confirm them with the Web "Test connection" action.
+
+```env
+# Anspire Open API keys (multiple keys supported, separated by commas)
+# Get your key at: https://open.anspire.cn/dsa?share_code=QFBC0FYC
+# When no higher-priority OpenAI-compatible source is set, this key is reused for Anspire search + LLM path (example fallback behavior only).
+# Example model: Doubao-Seed-2.0-lite; example gateway: https://open-gateway.anspire.cn/v6
+ANSPIRE_API_KEYS=sk-xxxxxxxxxxxxxxxx
+# Optional: switch example model or gateway according to your Anspire account and official docs.
+# ANSPIRE_LLM_MODEL=Doubao-Seed-2.0-pro
+# ANSPIRE_LLM_BASE_URL=https://open-gateway.anspire.ai/v6
+```
 
 > **Congratulations! If you're a beginner, you can stop reading here and run the program!**
 > Want to test the connection? Open your terminal in the root directory and run: `python scripts/check_env.py --llm`
@@ -216,6 +216,7 @@ The backend exposes a read-only status endpoint at `GET /api/v1/system/config/se
 
 ### Official references for provider presets / Base URLs / model naming
 
+- Modelflare: [Quickstart](https://docs.modelflare.dev/quickstart/), [Endpoints](https://docs.modelflare.dev/guides/endpoints/), [Models and groups](https://docs.modelflare.dev/guides/models-and-groups/)
 - OpenAI-compatible routing in LiteLLM: <https://docs.litellm.ai/docs/providers/openai_compatible>
 - OpenAI official API docs: <https://platform.openai.com/docs/api-reference/chat>
 - DeepSeek official API docs: <https://api-docs.deepseek.com/>
@@ -238,7 +239,25 @@ If you prefer modifying files, configuring this in the `.env` file is also very 
 1. **Declare your channels first**: `LLM_CHANNELS=channel_name_1,channel_name_2`
 2. **Provide configurations for each channel** (Note the uppercase): `LLM_{CHANNEL_NAME}_XXX`
 
-### Example: Anspire Responses API (observed GPT-5.6 model names)
+### Example: Modelflare
+
+[Register with Modelflare](https://modelflare.dev/sign-up?utm_source=github&utm_campaign=daily_stock_analysis), create an API key in the console, and configure:
+
+```env
+MODELFLARE_KEY=sk-xxx
+```
+
+With `MODELFLARE_KEY` alone, the backend enables Modelflare and uses `https://modelflare.dev/v1` and `openai/gpt-6.1-sol`. No channel, endpoint or model variables are required. Explicit YAML or `LLM_CHANNELS` takes precedence; explicit Modelflare channel keys override this shorthand. Clear the key or disable the channel to stop using it. Inference does not rewrite saved configuration.
+
+When `modelflare` is the only declared channel and its model list is blank, the backend defaults to `openai/gpt-6.1-sol` if no primary model is configured; otherwise it reuses `LITELLM_MODEL` and OpenAI-prefixed fallback routes. Use `openai/<model>` for the primary model. An explicit channel list takes precedence; multi-channel setups must declare each channel's models. Inference does not rewrite saved configuration or change model selection.
+
+For the channel named `modelflare`, an omitted or blank Base URL defaults to `https://modelflare.dev/v1`; an explicit `LLM_MODELFLARE_BASE_URL` takes precedence. Protocol defaults to `openai` for this endpoint and the API surface to `chat_completions`. When `LITELLM_MODEL` is unset, the first channel model is selected. The default model still requires account access; no API key is supplied automatically.
+
+`gpt-6.1-sol` is this project's Modelflare default. Select models available to your account and confirm them with the Web editor's "Discover models" and "Test connection" actions; do not append `/chat/completions` to the Base URL. Modelflare is the initially selected template for new channels. Reordering templates does not change saved channels or primary models. Anspire Search continues to use `ANSPIRE_API_KEYS` independently.
+
+Both the client's quick-add registration button and the exclusive registration link in channel details use the app UTM; README links use the github UTM. If a new channel has no key yet, or the primary/fallback model is not declared by an enabled channel, status preview shows the affected configuration fields. Supply the key, select available models or clear invalid fallback selections, then retry. Preview does not rewrite saved settings.
+
+### Compatibility example: Anspire Responses API (observed GPT-5.6 model names)
 
 ```env
 LLM_CHANNELS=anspire
@@ -458,7 +477,7 @@ The bundled `00-daily-analysis.yml` explicitly passes the common LLM runtime fie
 
 - Runtime selection: `GENERATION_BACKEND`, `GENERATION_FALLBACK_BACKEND`, `GENERATION_BACKEND_TIMEOUT_SECONDS`, `GENERATION_BACKEND_MAX_OUTPUT_BYTES`, `GENERATION_BACKEND_MAX_CONCURRENCY`, `LOCAL_CLI_BACKEND_MAX_CONCURRENCY`, `AGENT_GENERATION_BACKEND`, `LLM_CHANNELS`, `LITELLM_MODEL`, `LITELLM_FALLBACK_MODELS`, `AGENT_LITELLM_MODEL`, `VISION_MODEL`, `VISION_PROVIDER_PRIORITY`, `LLM_TEMPERATURE`, `LLM_USAGE_HMAC_SECRET`, `LLM_USAGE_HMAC_KEY_VERSION`, `LLM_PROMPT_CACHE_TELEMETRY_ENABLED`, `LLM_PROMPT_CACHE_HINTS_ENABLED`, `LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL`
 - Multiple keys: `GEMINI_API_KEYS`, `ANTHROPIC_API_KEYS`, `OPENAI_API_KEYS`, `DEEPSEEK_API_KEYS` (the current workflow imports these from repository Secrets only, not from same-named Variables)
-- Common channel names: `primary`, `secondary`, `aihubmix`, `deepseek`, `dashscope`, `zhipu`, `moonshot`, `minimax`, `volcengine`, `siliconflow`, `openrouter`, `requesty`, `gemini`, `anthropic`, `openai`, `ollama`
+- Common channel names: `modelflare`, `primary`, `secondary`, `aihubmix`, `anspire`, `deepseek`, `dashscope`, `zhipu`, `moonshot`, `minimax`, `volcengine`, `siliconflow`, `openrouter`, `requesty`, `gemini`, `anthropic`, `openai`, `ollama`, `hermes`
 
 For example, if you set `LLM_CHANNELS=primary,deepseek` in GitHub Actions, also configure the corresponding `LLM_PRIMARY_*` and `LLM_DEEPSEEK_*` entries. The `LLM_<NAME>_API_KEY` / `LLM_<NAME>_API_KEYS` fields are also imported from repository Secrets only right now, so storing them in Variables will not work at runtime. If you use a custom channel name such as `my_proxy`, GitHub Actions must explicitly add matching `LLM_MY_PROXY_*` mappings in the workflow `env:` block. Local `.env` and Docker runs do not have this limitation.
 

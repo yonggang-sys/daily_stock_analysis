@@ -595,6 +595,147 @@ describe('LLMChannelEditor', () => {
     expect(within(visionModelSelect).getByRole('option', { name: 'minimax/MiniMax-M1' })).toBeInTheDocument();
   });
 
+  it('starts with Modelflare and creates its OpenAI-compatible channel draft', async () => {
+    render(
+      <LLMChannelEditor
+        items={[]}
+        configVersion="v1"
+        maskToken="******"
+        onSaved={() => {}}
+      />
+    );
+
+    const providerSelect = screen.getByRole('combobox', { name: '' });
+    expect(providerSelect).toHaveValue('modelflare');
+    expect(within(providerSelect).getAllByRole('option').filter((option) => (
+      (option as HTMLOptionElement).value !== ''
+    ))[0]).toHaveValue('modelflare');
+    fireEvent.click(screen.getByRole('button', { name: '+ 添加渠道' }));
+
+    await screen.findByRole('button', { name: /Modelflare（聚合平台）/i });
+    expect(screen.getByLabelText('渠道名称')).toHaveValue('modelflare');
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://modelflare.dev/v1');
+    expect(screen.getByLabelText('模型（逗号分隔）')).toHaveValue('gpt-6.1-sol');
+    expect(screen.getByLabelText('API Key')).toHaveValue('');
+    expect(screen.getByRole('link', { name: 'Modelflare 专属注册' })).toHaveAttribute(
+      'href', 'https://modelflare.dev/sign-up?utm_source=daily_stock_analysis&utm_campaign=app',
+    );
+  });
+
+  it('shows inherited Modelflare models from existing global settings without auto-saving', async () => {
+    render(<LLMChannelEditor items={[
+      { key: 'LLM_CHANNELS', value: 'modelflare' },
+      { key: 'LITELLM_MODEL', value: 'openai/account-model' },
+      { key: 'LITELLM_FALLBACK_MODELS', value: 'openai/fallback-model' },
+    ]} configVersion="v1" maskToken="******" onSaved={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Modelflare（聚合平台）/i }));
+    expect(screen.getByLabelText('模型（逗号分隔）')).toHaveValue('openai/account-model,openai/fallback-model');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('shows the Modelflare default without requiring a primary model or auto-saving', async () => {
+    render(<LLMChannelEditor items={[
+      { key: 'LLM_CHANNELS', value: 'modelflare' },
+    ]} configVersion="v1" maskToken="******" onSaved={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Modelflare（聚合平台）/i }));
+    expect(screen.getByLabelText('模型（逗号分隔）')).toHaveValue('openai/gpt-6.1-sol');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('loads MODELFLARE_KEY alone and saves a key edit without persisting inferred defaults', async () => {
+    update.mockResolvedValue({ success: true, configVersion: 'v2', appliedCount: 1,
+      skippedMaskedCount: 0, reloadTriggered: true, updatedKeys: ['MODELFLARE_KEY'], warnings: [] });
+    render(<LLMChannelEditor items={[
+      { key: 'MODELFLARE_KEY', value: 'sk-existing', rawValueExists: true },
+    ]} configVersion="v1" maskToken="******" onSaved={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Modelflare（聚合平台）/i }));
+    expect(screen.getByLabelText('API Key')).toHaveValue('sk-existing');
+    expect(screen.getByLabelText('模型（逗号分隔）')).toHaveValue('openai/gpt-6.1-sol');
+    expect(update).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('API Key'), { target: { value: 'sk-new' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存 AI 配置' }));
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    expect(update.mock.calls[0][0].items).toEqual([{ key: 'MODELFLARE_KEY', value: 'sk-new' }]);
+  });
+
+  it('does not append Modelflare to explicitly declared channels when its shorthand key exists', () => {
+    render(<LLMChannelEditor items={[
+      ...openAiItems, { key: 'MODELFLARE_KEY', value: 'sk-existing' },
+    ]} configVersion="v1" maskToken="******" onSaved={() => {}} />);
+    expect(screen.queryByRole('button', { name: /Modelflare（聚合平台）/i })).not.toBeInTheDocument();
+  });
+
+  it('clears the shorthand key when removing its inferred channel', async () => {
+    const onDraftItemsChange = vi.fn();
+    render(<LLMChannelEditor items={[
+      { key: 'MODELFLARE_KEY', value: 'sk-existing', rawValueExists: true },
+    ]} configVersion="v1" maskToken="******" onSaved={() => {}} onDraftItemsChange={onDraftItemsChange} />);
+    fireEvent.click(screen.getByRole('button', { name: '✕' }));
+    await waitFor(() => expect(lastDraftCall(onDraftItemsChange)).toContainEqual({ key: 'MODELFLARE_KEY', value: '' }));
+  });
+
+  it('shows the tracked registration link beside the provider selection only for Modelflare', () => {
+    render(
+      <LLMChannelEditor
+        items={[]}
+        configVersion="v1"
+        maskToken="******"
+        onSaved={() => {}}
+      />
+    );
+
+    const providerSelect = screen.getByRole('combobox', { name: '' });
+    const registrationLink = screen.getByRole('link', { name: '注册 Modelflare' });
+    expect(registrationLink).toHaveAttribute(
+      'href',
+      'https://modelflare.dev/sign-up?utm_source=daily_stock_analysis&utm_campaign=app',
+    );
+    expect(registrationLink).toHaveAttribute('target', '_blank');
+    expect(registrationLink).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(registrationLink.parentElement).toContainElement(providerSelect);
+
+    for (const provider of ['anspire', 'aihubmix', 'deepseek', 'custom']) {
+      fireEvent.change(providerSelect, { target: { value: provider } });
+      expect(screen.queryByRole('link', { name: '注册 Modelflare' })).not.toBeInTheDocument();
+    }
+
+    fireEvent.change(providerSelect, { target: { value: 'modelflare' } });
+    expect(screen.getAllByRole('link', { name: '注册 Modelflare' })).toHaveLength(1);
+  });
+
+  it('preserves saved Anspire settings when selecting the new Modelflare preset', async () => {
+    const onDraftItemsChange = vi.fn();
+    render(
+      <LLMChannelEditor
+        items={[
+          { key: 'LLM_CHANNELS', value: 'anspire' },
+          { key: 'LLM_ANSPIRE_PROTOCOL', value: 'openai' },
+          { key: 'LLM_ANSPIRE_BASE_URL', value: 'https://existing.example.com/v1' },
+          { key: 'LLM_ANSPIRE_ENABLED', value: 'true' },
+          { key: 'LLM_ANSPIRE_API_KEY', value: 'existing-key' },
+          { key: 'LLM_ANSPIRE_MODELS', value: 'existing-model' },
+        ]}
+        configVersion="v1"
+        maskToken="******"
+        onSaved={() => {}}
+        onDraftItemsChange={onDraftItemsChange}
+      />
+    );
+
+    const providerSelect = screen.getByRole('combobox', { name: '' });
+    fireEvent.change(providerSelect, { target: { value: 'anspire' } });
+    expect(screen.queryByRole('link', { name: '注册 Modelflare' })).not.toBeInTheDocument();
+    fireEvent.change(providerSelect, { target: { value: 'modelflare' } });
+    fireEvent.click(screen.getByRole('button', { name: /Anspire Open/i }));
+
+    expect(await screen.findByLabelText('渠道名称')).toHaveValue('anspire');
+    expect(screen.getByLabelText('Base URL')).toHaveValue('https://existing.example.com/v1');
+    expect(screen.getByLabelText('API Key')).toHaveValue('existing-key');
+    expect(screen.getByLabelText('模型（逗号分隔）')).toHaveValue('existing-model');
+    await waitFor(() => expect(onDraftItemsChange).toHaveBeenLastCalledWith([]));
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('uses DeepSeek V4 defaults when adding the official preset', async () => {
     render(
       <LLMChannelEditor

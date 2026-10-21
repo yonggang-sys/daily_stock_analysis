@@ -16,7 +16,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple
 from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv, dotenv_values
 from dataclasses import dataclass, field
@@ -130,6 +130,8 @@ DEFAULT_ETF_ROTATION_SAFE_ASSET = "511880"
 # These are compatibility examples; actual availability should be validated by Anspire console/model entitlement.
 ANSPIRE_LLM_BASE_URL_DEFAULT = "https://open-gateway.anspire.cn/v6"
 ANSPIRE_LLM_MODEL_DEFAULT = "Doubao-Seed-2.0-lite"
+MODELFLARE_LLM_BASE_URL_DEFAULT = "https://modelflare.dev/v1"
+MODELFLARE_LLM_MODEL_DEFAULT = "openai/gpt-6.1-sol"
 
 
 def _has_ntfy_topic_endpoint(value: Optional[str]) -> bool:
@@ -499,6 +501,61 @@ def apply_litellm_api_surface(model: str, api_surface: Optional[str]) -> str:
     if remainder.startswith("responses/"):
         return normalized_model
     return f"{provider}/responses/{remainder}"
+
+
+def resolve_llm_channel_base_url(channel_name: str, base_url: Optional[str]) -> str:
+    """Apply named-channel endpoint defaults without changing explicit configuration."""
+    explicit = (base_url or "").strip()
+    if explicit:
+        return explicit
+    if channel_name.strip().lower() == "modelflare":
+        return MODELFLARE_LLM_BASE_URL_DEFAULT
+    return ""
+
+
+def resolve_llm_channel_names(config_map: Mapping[str, str]) -> str:
+    """Infer the Modelflare channel from its key unless channels are explicit."""
+    channels = (config_map.get("LLM_CHANNELS") or "").strip()
+    if channels:
+        return channels
+    if any(
+        key.strip()
+        for field in ("MODELFLARE_KEY", "LLM_MODELFLARE_API_KEY", "LLM_MODELFLARE_API_KEYS")
+        for key in (config_map.get(field) or "").split(',')
+    ):
+        return "modelflare"
+    return ""
+
+
+def resolve_llm_channel_api_keys(
+    channel_name: str, api_keys: List[str], config_map: Mapping[str, str],
+) -> List[str]:
+    """Keep explicit channel keys first, with MODELFLARE_KEY as its shorthand."""
+    if api_keys or channel_name.strip().lower() != "modelflare":
+        return api_keys
+    return [key.strip() for key in (config_map.get("MODELFLARE_KEY") or "").split(',') if key.strip()]
+
+
+def resolve_llm_channel_models(
+    channel_name: str,
+    models: List[str],
+    *,
+    channel_names: str,
+    primary_model: str = "",
+    fallback_models: str = "",
+) -> List[str]:
+    """Resolve explicit routes or the default for a single Modelflare channel."""
+    if models:
+        return models
+    names = [name.strip().lower() for name in channel_names.split(',') if name.strip()]
+    primary = primary_model.strip() or MODELFLARE_LLM_MODEL_DEFAULT
+    if (names != ["modelflare"] or channel_name.strip().lower() != "modelflare"
+            or not primary.startswith("openai/") or not primary[7:].strip()):
+        return []
+    routes = [primary] + [model.strip() for model in fallback_models.split(',')]
+    return list(dict.fromkeys(
+        route for route in routes if route.startswith("openai/") and route[7:].strip()
+    ))
 
 
 def resolve_llm_channel_protocol(
@@ -1602,7 +1659,7 @@ class Config:
 
         # Priority 2: LLM_CHANNELS (env var based channel config)
         if not llm_model_list:
-            _channels_str = os.getenv('LLM_CHANNELS', '').strip()
+            _channels_str = resolve_llm_channel_names(os.environ)
             if _channels_str:
                 llm_channel_names = [
                     ch.strip().lower()
@@ -2470,7 +2527,9 @@ class Config:
             ch_lower = ch_name.lower()
             ch_upper = ch_name.upper()
 
-            base_url = os.getenv(f'LLM_{ch_upper}_BASE_URL', '').strip() or None
+            base_url = resolve_llm_channel_base_url(
+                ch_name, os.getenv(f'LLM_{ch_upper}_BASE_URL', '')
+            ) or None
             if ch_lower == "anspire" and not base_url:
                 base_url = (
                     os.getenv('ANSPIRE_LLM_BASE_URL') or ANSPIRE_LLM_BASE_URL_DEFAULT
@@ -2494,10 +2553,16 @@ class Config:
             if not api_keys and ch_lower == "anspire":
                 anspire_keys_raw = os.getenv('ANSPIRE_API_KEYS', '')
                 api_keys = [k.strip() for k in anspire_keys_raw.split(',') if k.strip()]
+            api_keys = resolve_llm_channel_api_keys(ch_name, api_keys, os.environ)
 
             # Models
             models_raw = os.getenv(f'LLM_{ch_upper}_MODELS', '')
             raw_models = [m.strip() for m in models_raw.split(',') if m.strip()]
+            raw_models = resolve_llm_channel_models(
+                ch_name, raw_models, channel_names=channels_str,
+                primary_model=os.getenv('LITELLM_MODEL', ''),
+                fallback_models=os.getenv('LITELLM_FALLBACK_MODELS', ''),
+            )
             if not raw_models and ch_lower == "anspire":
                 anspire_model = (
                     os.getenv('ANSPIRE_LLM_MODEL') or ANSPIRE_LLM_MODEL_DEFAULT

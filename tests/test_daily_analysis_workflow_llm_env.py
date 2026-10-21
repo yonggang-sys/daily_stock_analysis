@@ -80,6 +80,13 @@ def test_daily_analysis_maps_all_provider_template_channels() -> None:
     assert not any(key.startswith("LLM_ARK_") for key in env)
 
 
+def test_daily_analysis_accepts_modelflare_one_key_from_secrets() -> None:
+    assert _load_daily_analysis_env()["MODELFLARE_KEY"] == "${{ secrets.MODELFLARE_KEY }}"
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    analyze = next(step for step in workflow["jobs"]["analyze"]["steps"] if step.get("name") == "执行股票分析")
+    assert '[ -n "$MODELFLARE_KEY" ]' in analyze["run"]
+
+
 def test_daily_analysis_keeps_channel_secrets_in_secrets_context() -> None:
     templates = _extract_provider_templates()
     env = _load_daily_analysis_env()

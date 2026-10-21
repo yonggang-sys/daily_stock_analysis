@@ -52,6 +52,7 @@ def validate_chat_identity(token: str, registry: IndexRegistry, lookup: dict) ->
 def object_mentions(text: str, registry: IndexRegistry, lookup: dict) -> tuple[ObjectMention, ...]:
     """Retain failed/ambiguous evidence at its own location, not a global flag."""
     mentions = []
+    full_name_spans = []
     for start, end, raw in extract_stock_code_spans(text):
         try:
             identities = (validate_chat_identity(raw, registry, lookup),)
@@ -87,6 +88,19 @@ def object_mentions(text: str, registry: IndexRegistry, lookup: dict) -> tuple[O
                     adjacent.append(code.identity)
             identities = tuple(adjacent if len(adjacent) == 1 else candidates)
             mentions.append(ObjectMention(start, end, text[start:end], "name", identities))
+            if identities and any(
+                unicodedata.normalize("NFKC", label).strip().casefold() == name
+                for _code, label, _kind in rows
+            ):
+                full_name_spans.append((start, end))
+    # A registered full name is one lexical object. Its embedded aliases or
+    # ticker-like fragments must not manufacture another discussion target.
+    # Separate mentions, equal spans and partial overlaps retain their evidence.
+    mentions = [mention for mention in mentions if not any(
+        start <= mention.start and mention.end <= end
+        and (start, end) != (mention.start, mention.end)
+        for start, end in full_name_spans
+    )]
     # Overlapping different name facts remain locally ambiguous. Equal facts
     # may coexist (code + adjacent name); they never erase a repeat elsewhere.
     original = tuple(mentions)

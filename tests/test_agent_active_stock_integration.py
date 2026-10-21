@@ -2301,3 +2301,104 @@ def test_legacy_prepare_deletion_during_compression_cannot_rebind_request(db, ch
     assert called == [True]
     assert [m["content"] for m in db.get_conversation_messages(sid)] == ["分析300750"]
     assert db.get_conversation_summary(sid) is None
+
+
+@pytest.fixture
+def bundled_chat_stock_index(tmp_path, monkeypatch):
+    """Use the shipped catalogue, including real cross-stock short aliases."""
+    from pathlib import Path
+    from src.data import stock_index_loader
+
+    bundled = Path(__file__).resolve().parents[1] / "apps/dsa-web/public/stocks.index.json"
+    stock_index_loader.clear_stock_index_cache()
+    monkeypatch.setattr(stock_index_loader, "get_stock_index_candidate_paths", lambda: (bundled,))
+    monkeypatch.setattr(stock_index_loader, "get_remote_stock_index_cache_path", lambda: tmp_path / "absent.json")
+    yield
+    stock_index_loader.clear_stock_index_cache()
+
+
+@pytest.mark.parametrize("message,kind,code", [
+    ("请深入分析 长电科技(600584.SH)", "confirm", "600584"),
+    ("长电科技", "confirm", "600584"),
+    ("分析长电", "confirm", "600900"),
+    ("分析长电科技(600900.SH)", "clarify", None),
+    ("分析贵州茅台(600584.SH)", "clarify", None),
+    ("不要分析长电科技", "maintain", None),
+    ("如果上涨，就分析长电科技", "clarify", None),
+    ("他说“分析长电科技”", "clarify", None),
+    ("分析中芯国际", "clarify", None),
+    ("分析中芯国际(688981.SH)", "confirm", "688981"),
+    ("分析中芯国际(00981.HK)", "confirm", "HK00981"),
+    ("比较长电科技和长江电力", "compare", None),
+    ("长电科技和贵州茅台", "clarify", None),
+    ("请深入分析 平安银行(000001.SZ)", "confirm", "000001"),
+    ("请深入分析 中信银行(601998.SH)", "confirm", "601998"),
+    ("请深入分析 京东方A(000725.SZ)", "confirm", "000725"),
+])
+def test_full_registered_name_owns_embedded_mentions(bundled_chat_stock_index, message, kind, code):
+    from src.agent.chat_object_decision import decide_chat_object
+    from src.services.agent_chat_session_service import _stock_lookup
+
+    registry, lookup = _stock_lookup()
+    decision = decide_chat_object(message, None, registry, lookup)
+    assert decision.kind == kind
+    if code is not None:
+        assert decision.target.identity.stock_code == code
+    if kind == "compare":
+        assert {identity.stock_code for identity in decision.participants} == {"600584", "600900"}
+
+
+@pytest.fixture
+def actual_bundled_chat_api(actual_chat_api, bundled_chat_stock_index):
+    # Keep the real HTTP/session/executor chain; only the model boundary is
+    # controlled by actual_chat_api. Name lookup uses the complete shipped file.
+    return actual_chat_api
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("message,code", [
+    ("请深入分析 长电科技(600584.SH)", "600584"),
+    ("长电科技", "600584"),
+    ("请深入分析 平安银行(000001.SZ)", "000001"),
+    ("请深入分析 中信银行(601998.SH)", "601998"),
+    ("请深入分析 京东方A(000725.SZ)", "000725"),
+    ("分析长电科技(600900.SH)", None),
+])
+def test_actual_chat_api_full_name_overlap(actual_bundled_chat_api, stream, message, code):
+    client, requests, _config = actual_bundled_chat_api
+    response = client.post("/api/v1/agent/chat" + ("/stream" if stream else ""), json={
+        "session_id": "full-name-overlap", "message": message, "skills": [],
+    })
+    assert response.status_code == 200
+    events = [json.loads(line[6:]) for line in response.text.splitlines()
+              if line.startswith("data: ")] if stream else []
+    accepted = events[0] if stream else response.json()
+    final = events[-1] if stream else response.json()
+    if stream:
+        assert events[0]["type"] == "accepted"
+        assert events[-1]["type"] == "done"
+    if code is None:
+        assert accepted["active_stock_context"] is None
+        assert "请明确提供" in final["content"]
+        assert requests == []
+    else:
+        assert accepted["active_stock_context"]["stock_code"] == code
+        assert final["content"] == "controlled API answer"
+        assert len(requests) == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_actual_chat_api_repeated_full_name_keeps_target(actual_bundled_chat_api, stream):
+    client, requests, _config = actual_bundled_chat_api
+    for message in ["请深入分析 长电科技(600584.SH)", "长电科技", "请深入分析 长电科技(600584.SH)"]:
+        response = client.post("/api/v1/agent/chat" + ("/stream" if stream else ""), json={
+            "session_id": "repeated-full-name", "message": message, "skills": [],
+            "context": {"stock_code": "600584"},
+        })
+        assert response.status_code == 200
+        events = [json.loads(line[6:]) for line in response.text.splitlines()
+                  if line.startswith("data: ")] if stream else []
+        accepted = events[0] if stream else response.json()
+        assert accepted["active_stock_context"]["stock_code"] == "600584"
+        assert (events[-1] if stream else response.json())["content"] == "controlled API answer"
+    assert len(requests) == 3

@@ -7,6 +7,10 @@ export type LLMProviderCapability =
   | 'vision'
   | 'local-runtime';
 
+export const MODELFLARE_APP_REGISTRATION_URL =
+  'https://modelflare.dev/sign-up?utm_source=daily_stock_analysis&utm_campaign=app';
+export const MODELFLARE_DEFAULT_MODEL = 'gpt-6.1-sol';
+
 export interface LLMProviderTemplate {
   channelId: string;
   label: string;
@@ -50,6 +54,21 @@ export const LLM_PROVIDER_CAPABILITY_LABELS: Record<LLMProviderCapability, { lab
 
 export const LLM_PROVIDER_TEMPLATES: LLMProviderTemplate[] = [
   {
+    channelId: 'modelflare',
+    label: 'Modelflare（聚合平台）',
+    protocol: 'openai',
+    baseUrl: 'https://modelflare.dev/v1',
+    placeholderModels: MODELFLARE_DEFAULT_MODEL,
+    capabilities: ['openai-compatible', 'aggregator', 'model-discovery'],
+    configHint:
+      'API Key 的路由分组需支持所选模型；模型 ID 请以控制台或获取模型的结果为准。modelflare 渠道的 Base URL 留空时使用默认 /v1 地址，可按需覆盖，不额外拼接 /chat/completions。',
+    officialSources: [
+      { label: 'Modelflare 专属注册', url: MODELFLARE_APP_REGISTRATION_URL },
+      { label: 'Modelflare Docs', url: 'https://docs.modelflare.dev/' },
+      { label: 'Modelflare Models & Pricing', url: 'https://modelflare.dev/pricing' },
+    ],
+  },
+  {
     channelId: 'aihubmix',
     label: 'AIHubmix（聚合平台）',
     protocol: 'openai',
@@ -60,7 +79,7 @@ export const LLM_PROVIDER_TEMPLATES: LLMProviderTemplate[] = [
   },
   {
     channelId: 'anspire',
-    label: 'Anspire Open（一站式模型+搜索）',
+    label: 'Anspire Open',
     protocol: 'openai',
     baseUrl: 'https://open-gateway.anspire.cn/v6',
     placeholderModels: 'Doubao-Seed-2.0-lite,Doubao-Seed-2.0-pro,qwen3.5-flash,MiniMax-M2.7',

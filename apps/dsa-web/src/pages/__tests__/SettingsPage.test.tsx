@@ -293,6 +293,7 @@ vi.mock('../../components/settings', async () => {
       data-issues={issues.map((issue) => issue.code).join(',')}
     >
       <div>{item.key}</div>
+      <textarea id={`setting-${item.key}`} readOnly />
       {item.schema?.description ? <p>{item.schema.description}</p> : null}
       {item.schema?.options?.map((option) => {
         const label = typeof option === 'string' ? option : option.label;
@@ -694,6 +695,9 @@ describe('SettingsPage', () => {
     vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock');
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined);
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(mockedAnchorClick);
+    // jsdom does not implement `scrollIntoView` (scrolls would throw); stub it up front
+    // for every test, and let the scroll assertions read this shared stub.
+    HTMLElement.prototype.scrollIntoView = vi.fn();
     resetSharedDesktopUpdateState();
   });
 
@@ -729,9 +733,21 @@ describe('SettingsPage', () => {
     expect(setActiveCategory).toHaveBeenNthCalledWith(3, 'notification');
   });
 
+  it('scrolls to and focuses the stock list field when the setup guide watchlist action is used', async () => {
+    const scrollIntoView = HTMLElement.prototype.scrollIntoView;
+    useSystemConfigMock.mockReturnValue(buildSystemConfigState({ activeCategory: 'base' }));
+
+    renderSettingsPage();
+
+    expect(await screen.findByTestId('first-run-setup-card')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '维护自选股' }));
+
+    expect(scrollIntoView).toHaveBeenCalled();
+    expect(document.activeElement).toBe(document.getElementById('setting-STOCK_LIST'));
+  });
+
   it('applies category from the search string and scrolls to desktop version info', async () => {
-    const scrollIntoView = vi.fn();
-    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    const scrollIntoView = HTMLElement.prototype.scrollIntoView;
     (window as { dsaDesktop?: unknown }).dsaDesktop = {
       version: '3.12.0',
       getUpdateState: desktopGetUpdateState,

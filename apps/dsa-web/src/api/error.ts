@@ -169,6 +169,21 @@ function extractErrorCode(data: unknown): string | null {
   return pickString(data.error, data.code);
 }
 
+function extractConfigValidationIssues(data: unknown): string | null {
+  if (!isRecord(data)) return null;
+  const payload = isRecord(data.detail) ? data.detail : data;
+  if (!Array.isArray(payload.issues)) return null;
+  const messages = payload.issues.filter(isRecord).map((issue) => {
+    const key = pickString(issue.key);
+    let message = pickString(issue.message);
+    if (issue.code === 'missing_api_key') message = '请填写此渠道的 API Key。';
+    if (issue.code === 'missing_models') message = '请填写账号可用的模型。';
+    if (issue.code === 'unknown_model') message = '请选择当前启用渠道中的模型，或清空无效的模型选项。';
+    return message ? [key, message].filter(Boolean).join('：') : null;
+  }).filter((message): message is string => Boolean(message));
+  return messages.length ? messages.join('\n') : null;
+}
+
 export function extractErrorPayloadText(data: unknown): string | null {
   if (typeof data === 'string') {
     return data.trim() || null;
@@ -303,6 +318,21 @@ export function parseApiError(error: unknown): ParsedApiError {
   const rawMessage = pickString(payloadText, response?.statusText, errorMessage, causeMessage, code)
     ?? '请求未成功完成，请稍后重试。';
   const matchText = buildMatchText([rawMessage, errorMessage, causeMessage, code, errorCode, response?.statusText]);
+
+  if (errorCode === 'validation_failed') {
+    const issues = extractConfigValidationIssues(response?.data);
+    const message = issues
+      ? `请修正以下配置后重试：\n${issues}`
+      : '请检查渠道的 API Key、模型和运行参数后重试。';
+    return createParsedApiError({
+      title: '配置需要调整',
+      message,
+      rawMessage: message,
+      status,
+      category: 'http_error',
+      code: errorCode,
+    });
+  }
 
   if (errorCode === 'session_state_conflict' || code === 'session_state_conflict') {
     return createParsedApiError({
