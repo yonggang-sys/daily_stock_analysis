@@ -604,14 +604,31 @@ jobs:
             exit 0
           fi
 
-          # 解析自选股配置：
+          # 解析自选股配置（优先级：仓库文件 > Variables/Secrets > 默认值）：
+          # 0. 【2026-10-22 新增】config/ai_targets.json
+          #    由仪表盘「AI 报告标的池 → 保存并同步」写入；存在且 targets 非空时以它为准，
+          #    使前端保存即时生效，无需再改 Secret。解析失败/为空则静默回退到下面 1/2/3。
           # 1. Repository/Environment secrets 或 Repository variables（STOCK_LIST_CONFIG）
           # 2. 同名 Environment variables 注入的 runner 环境变量（STOCK_LIST）
           # 3. 最小默认值
-          if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
-            export STOCK_LIST="$STOCK_LIST_CONFIG"
-          elif [ -z "${STOCK_LIST:-}" ]; then
-            export STOCK_LIST="600519"
+          AI_TARGETS_FILE="config/ai_targets.json"
+          AI_TARGETS_USED=0
+          if [ -f "$AI_TARGETS_FILE" ]; then
+            AI_TARGETS_CSV=$(python3 -c "import json;d=json.load(open('$AI_TARGETS_FILE'));print(','.join(str(x) for x in (d.get('targets') or [])))" 2>/dev/null || true)
+            if [ -n "${AI_TARGETS_CSV:-}" ]; then
+              export STOCK_LIST="$AI_TARGETS_CSV"
+              AI_TARGETS_USED=1
+              echo "🎯 自选股来源: $AI_TARGETS_FILE（$(printf '%s\n' "$AI_TARGETS_CSV" | tr ',' '\n' | wc -l) 只）"
+            else
+              echo "⚠️ $AI_TARGETS_FILE 为空或解析失败，回退 Variables/Secrets"
+            fi
+          fi
+          if [ "$AI_TARGETS_USED" = "0" ]; then
+            if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
+              export STOCK_LIST="$STOCK_LIST_CONFIG"
+            elif [ -z "${STOCK_LIST:-}" ]; then
+              export STOCK_LIST="600519"
+            fi
           fi
 
           # 处理 LITELLM YAML 配置文件
