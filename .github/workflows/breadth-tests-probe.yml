@@ -1,0 +1,85 @@
+name: Breadth Tests (manual, temporary)
+
+# 临时工作流（2026-10-23）：在真实包环境里跑新浪广度单测 + 既有 tickflow 回落测试。
+# 只读、不产产物、不碰 ci-reports、不发飞书。验证完即删。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v5
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout
+
+      - name: 🧪 Run breadth + market-stats tests
+        run: |
+          set -o pipefail
+          time python -m pytest \
+            tests/test_sina_breadth_fetcher.py \
+            tests/test_tickflow_market_review_fallback.py \
+            tests/test_akshare_market_stats_timeout.py \
+            -v --timeout=120 -o timeout_method=thread | tee breadth-tests.log
+
+      - name: 🚫 Assert no real Sina traffic in the tickflow fallback test
+        run: |
+          python -u - <<'PY'
+          import time
+          from unittest.mock import patch
+
+          from data_provider.base import DataFetcherManager
+
+          class Dummy:
+              name = "AkshareFetcher"
+              priority = 1
+
+              def __init__(self):
+                  self.stats_calls = 0
+
+              def get_main_indices(self, region="cn"):
+                  return None
+
+              def get_market_stats(self):
+                  self.stats_calls += 1
+                  return {"up_count": 1, "down_count": 2, "flat_count": 3}
+
+          # 模拟 tests/test_tickflow_market_review_fallback.py 的用法：__new__ + 注入假 fetcher
+          manager = DataFetcherManager.__new__(DataFetcherManager)
+          dummy = Dummy()
+          manager._fetchers = [dummy]
+          manager._get_tickflow_fetcher = lambda: None
+
+          started = time.monotonic()
+          data = DataFetcherManager.get_market_stats(manager, purpose="market_review:cn")
+          elapsed = time.monotonic() - started
+
+          print("fabricated manager -> stats=%s elapsed=%.3fs calls=%d"
+                % (data, elapsed, dummy.stats_calls))
+          assert data["up_count"] == 1, data
+          assert dummy.stats_calls == 1, dummy.stats_calls
+          # 闸门生效 → 零网络，必然远小于一次真实 60 页抓取（runner 实测 10.95s）
+          assert elapsed < 2.0, "preflight guard seems disabled: %.2fs" % elapsed
+          print("GUARD OK")
+          PY
+
+      - name: 📤 Upload log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: breadth-tests-log-${{ github.run_number }}
+          path: breadth-tests.log
+          if-no-files-found: ignore
