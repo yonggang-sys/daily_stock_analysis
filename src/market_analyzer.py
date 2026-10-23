@@ -1195,7 +1195,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _build_stats_block(self, overview: MarketOverview) -> str:
         """Build market statistics block."""
-        has_stats = overview.up_count or overview.down_count or overview.total_amount
+        # 广度必须真的有值才出统计表：只补到成交额时旧判定会通过，
+        # 于是渲染出「上涨/下跌/平盘 0 / 0 / 0」——比整表不显示更糟。
+        has_stats = (overview.up_count + overview.down_count + overview.flat_count) > 0
         has_market_signal = bool(self._supports_market_light() and (overview.indices or has_stats))
         if not has_stats and not has_market_signal:
             return ""
