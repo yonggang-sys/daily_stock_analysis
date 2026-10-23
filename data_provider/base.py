@@ -690,6 +690,11 @@ class DataFetcherManager:
         self._fetcher_call_locks_lock = RLock()
         self._stock_name_cache: Dict[str, str] = {}
         self._stock_name_cache_lock = RLock()
+        # 广度前置源开关（2026-10-23）：只有「经 __init__ 正常构造」的管理器才启用。
+        # 离线单测惯用 DataFetcherManager.__new__(...) 注入假 fetcher 后直接调
+        # get_market_stats，不区分的话会在 `pytest -m "not network"` 里发起真实
+        # 新浪请求（60 页 / 2 域），既慢又用真快照污染断言。
+        self._sina_breadth_preflight_enabled = True
         
         if fetchers:
             # 按优先级排序
@@ -1543,6 +1548,11 @@ class DataFetcherManager:
         Fail-open by design: a missing module, a disabled flag, or any init error
         yields ``None`` so the caller keeps the previous provider chain untouched.
         """
+        # 只有经 __init__ 构造的管理器才启用：离线单测用 __new__ 伪造管理器并注入
+        # 假 fetcher，必须保证 get_market_stats 在那里零真网请求。
+        if not getattr(self, "_sina_breadth_preflight_enabled", False):
+            return None
+
         if not hasattr(self, "_sina_breadth_lock") or self._sina_breadth_lock is None:
             self._sina_breadth_lock = RLock()
 
