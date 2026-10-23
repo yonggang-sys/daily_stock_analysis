@@ -1532,6 +1532,40 @@ class DataFetcherManager:
                 self._tickflow_api_key = None
                 return None
 
+    def _get_sina_breadth_fetcher(self):
+        """Lazily create the breadth-only Sina fetcher used by market-review calls.
+
+        Deliberately kept out of ``self._fetchers``: as a regular provider it would
+        either become the first choice for K-line/quotes/sectors (priority 0 - far
+        too wide a blast radius) or sit behind AkShare's 46s timeout (priority 6).
+        ``get_market_stats`` calls it directly from a pre-flight branch instead.
+
+        Fail-open by design: a missing module, a disabled flag, or any init error
+        yields ``None`` so the caller keeps the previous provider chain untouched.
+        """
+        if not hasattr(self, "_sina_breadth_lock") or self._sina_breadth_lock is None:
+            self._sina_breadth_lock = RLock()
+
+        with self._sina_breadth_lock:
+            current_fetcher = getattr(self, "_sina_breadth_fetcher", None)
+            if current_fetcher is not None:
+                return current_fetcher
+
+            try:
+                from .sina_breadth_fetcher import SinaBreadthFetcher
+
+                if not SinaBreadthFetcher.is_enabled():
+                    self._sina_breadth_fetcher = None
+                    return None
+
+                fetcher = SinaBreadthFetcher()
+                self._sina_breadth_fetcher = fetcher
+                return fetcher
+            except Exception as exc:
+                logger.warning("[SinaBreadthFetcher] 初始化失败: %s", exc)
+                self._sina_breadth_fetcher = None
+                return None
+
     def close(self) -> None:
         """Best-effort release of manager-owned resources."""
         if not hasattr(self, "_tickflow_lock") or self._tickflow_lock is None:
@@ -3373,6 +3407,44 @@ class DataFetcherManager:
                     elapsed,
                     e,
                 )
+
+        # 广度前置源（2026-10-23 B+）：GitHub Actions runner 上通用链路拿不到涨跌统计 ——
+        # Efinance 被拦成 HTML、AkShare 在自己两条超时里烧掉 46.68s、Pytdx/Baostock/
+        # Yfinance/Tencent 都没实现 get_market_stats（继承基类 return None）。结果报告写
+        # 「涨跌家数与成交额数据缺失（显示为0）」，market_light 的广度维度退化成中性 50 分。
+        # 新浪分页快照在 runner 上可达，整市场（≈60 页）约 7s 一次取全，家数与成交额同源，
+        # 故在通用链路之前先试它。只在 A 股语境启用：us/hk 等区域维持原链路行为。
+        purpose_region = purpose.rsplit(":", 1)[-1].strip().lower() if ":" in purpose else ""
+        if purpose_region in ("", "cn"):
+            sina_breadth_fetcher = self._get_sina_breadth_fetcher()
+            if sina_breadth_fetcher is not None:
+                started_at = time.monotonic()
+                try:
+                    data = sina_breadth_fetcher.get_market_stats()
+                    elapsed = time.monotonic() - started_at
+                    if data:
+                        logger.info(
+                            "[MarketStats] component=market_stats action=provider_success "
+                            "purpose=%s provider=SinaBreadthFetcher elapsed=%.2fs",
+                            purpose,
+                            elapsed,
+                        )
+                        return data
+                    logger.info(
+                        "[MarketStats] component=market_stats action=provider_empty "
+                        "purpose=%s provider=SinaBreadthFetcher elapsed=%.2fs",
+                        purpose,
+                        elapsed,
+                    )
+                except Exception as e:
+                    elapsed = time.monotonic() - started_at
+                    logger.warning(
+                        "[MarketStats] component=market_stats action=provider_failed "
+                        "purpose=%s provider=SinaBreadthFetcher elapsed=%.2fs error=%s",
+                        purpose,
+                        elapsed,
+                        e,
+                    )
 
         for fetcher in self._fetchers:
             if fetcher.name == "TickFlowFetcher":
