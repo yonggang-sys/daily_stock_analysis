@@ -182,6 +182,27 @@ if TYPE_CHECKING:
     from src.analyzer import AnalysisResult
 
 
+def _brief_failure_reason(result: Any, limit: int = 60) -> str:
+    """把失败原因压缩成一句话，供摘要行直接展示。
+
+    原始 error_message 常常是整段异常文本（例如 429 的完整响应），
+    直接拼进飞书/微信摘要会撑破卡片，因此先归一化空白、归类、再截断。
+    """
+    raw = getattr(result, "error_message", None) or ""
+    text = " ".join(str(raw).split()).strip()
+    if not text:
+        return "未知原因"
+    low = text.lower()
+    if ("429" in text or "resource exhausted" in low
+            or "rate_limit" in low or "ratelimit" in low or "quota" in low):
+        return "模型限流(429)，下个周期自动恢复"
+    if "timeout" in low or "timed out" in low:
+        return "模型调用超时，下个周期自动恢复"
+    if "json" in low and ("invalid" in low or "not valid" in low or "parse" in low):
+        return "模型返回非 JSON，本次结果未采纳"
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
 class NotificationChannel(Enum):
     """通知渠道类型"""
     WECHAT = "wechat"      # 企业微信
@@ -1334,6 +1355,7 @@ class NotificationService(
                 if not getattr(r, "success", True):
                     report_lines.append(
                         f"⚠️ **{display_name}({r.code})**: 分析失败（未纳入 AI 研判）"
+                        f"：{_brief_failure_reason(r)}"
                     )
                     continue
                 signal_text, signal_emoji, _ = self._get_signal_level(r)
@@ -1699,7 +1721,10 @@ class NotificationService(
                 # 方案1：失败占位块在微信摘要中也以 ⚠️ 标识。
                 if not getattr(r, "success", True):
                     stock_name = self._get_display_name(r, report_language)
-                    lines.append(f"⚠️ **{stock_name}({r.code})**: 分析失败（未纳入 AI 研判）")
+                    lines.append(
+                        f"⚠️ **{stock_name}({r.code})**: 分析失败（未纳入 AI 研判）"
+                        f"：{_brief_failure_reason(r)}"
+                    )
                     continue
                 signal_text, signal_emoji, _ = self._get_signal_level(r)
                 stock_name = self._get_display_name(r, report_language)
