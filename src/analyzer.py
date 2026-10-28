@@ -303,6 +303,10 @@ _LLM_MODEL_COOLDOWN: Dict[str, Dict[str, Any]] = {}
 _LLM_COOLDOWN_STEPS: Tuple[int, ...] = (120, 300, 900, 1800)
 # "This model does not exist / is not available on your plan" is not transient.
 _LLM_COOLDOWN_DEAD = 24 * 3600
+# Quota/5xx failures are cooled only after this many consecutive misses, so a
+# per-minute (RPM) throttle is retried instead of being mistaken for a dead
+# model. A truly exhausted daily quota reaches this streak within 3 requests.
+_LLM_COOLDOWN_STREAK = 3
 
 
 def _llm_error_kind(error_text: str) -> str:
@@ -370,11 +374,17 @@ def mark_llm_model_unhealthy(model: str, error_text: str) -> int:
             seconds = _LLM_COOLDOWN_DEAD
         elif kind == "auth":
             seconds = max(_LLM_COOLDOWN_STEPS[-1], 3600)
+        elif record["fails"] < _LLM_COOLDOWN_STREAK:
+            # Let the request layer retry: a short throttle usually clears by
+            # itself, and cooling the main model on the first miss would push
+            # the remaining stocks onto weaker backups for no reason.
+            seconds = 0
         else:
-            index = min(record["fails"] - 1, len(_LLM_COOLDOWN_STEPS) - 1)
+            index = min(record["fails"] - _LLM_COOLDOWN_STREAK, len(_LLM_COOLDOWN_STEPS) - 1)
             seconds = _LLM_COOLDOWN_STEPS[index]
-        record["until"] = time.time() + seconds
-        record["reason"] = (error_text or "")[:200]
+        if seconds:
+            record["until"] = time.time() + seconds
+            record["reason"] = (error_text or "")[:200]
     return seconds
 
 
