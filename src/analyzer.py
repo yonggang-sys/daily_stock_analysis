@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple, Callable, Union
@@ -280,6 +281,123 @@ def _legacy_audit_marker_specs(
     news_marker = "## 📰 News Intelligence" if english else "## 📰 舆情情报"
     add("news_context", news_marker if news_context else None)
     return markers
+
+
+# ---------------------------------------------------------------------------
+# LLM model health gate (circuit breaker)
+#
+# A model that just failed with a hard error (daily quota exhausted, model
+# removed from the plan, auth rejected) will fail again for every remaining
+# stock in the same run. That turned a 12-minute analysis into a 22-minute one
+# on 2026-10-28: five models x 16 stocks, mostly throwing 429/404.
+#
+# We keep a process-local cooldown table so the fallback chain degrades to a
+# cheap "skip + log" instead of hammering an endpoint that cannot answer.
+# Cooldowns escalate on repeat failures and are cleared by a success.
+# ---------------------------------------------------------------------------
+
+_LLM_MODEL_COOLDOWN_LOCK = threading.Lock()
+_LLM_MODEL_COOLDOWN: Dict[str, Dict[str, Any]] = {}
+
+# Escalating cooldown ladder (seconds) for models that keep failing.
+_LLM_COOLDOWN_STEPS: Tuple[int, ...] = (120, 300, 900, 1800)
+# "This model does not exist / is not available on your plan" is not transient.
+_LLM_COOLDOWN_DEAD = 24 * 3600
+
+
+def _llm_error_kind(error_text: str) -> str:
+    """Classify a sanitized LLM error string into a coarse failure kind.
+
+    Returns one of ``dead`` / ``auth`` / ``quota`` / ``transient`` / ``unknown``.
+    """
+    text = (error_text or "").lower()
+    if not text:
+        return "unknown"
+    if (
+        "notfounderror" in text
+        or "model_not_found" in text
+        or "model not found" in text
+        or "does not exist" in text
+        or "unavailable for free" in text
+        or "no such model" in text
+    ):
+        return "dead"
+    if (
+        "authenticationerror" in text
+        or "invalid api key" in text
+        or "unauthorized" in text
+        or "permissiondenied" in text
+        or "account_overdue" in text
+        or re.search(r"\b40[13]\b", text)
+    ):
+        return "auth"
+    if (
+        "ratelimiterror" in text
+        or "rate limit" in text
+        or "rate_limit" in text
+        or "resource exhausted" in text
+        or "resource_exhausted" in text
+        or "exceeded your current" in text
+        or "quota" in text
+        or re.search(r"\b429\b", text)
+    ):
+        return "quota"
+    if (
+        "service unavailable" in text
+        or "overloaded" in text
+        or "timeout" in text
+        or "timed out" in text
+        or re.search(r"\b50[234]\b", text)
+    ):
+        return "transient"
+    return "unknown"
+
+
+def mark_llm_model_unhealthy(model: str, error_text: str) -> int:
+    """Record a hard failure for *model*; return the cooldown applied in seconds."""
+    key = (model or "").strip()
+    if not key:
+        return 0
+    kind = _llm_error_kind(error_text)
+    if kind == "unknown":
+        return 0
+    with _LLM_MODEL_COOLDOWN_LOCK:
+        record = _LLM_MODEL_COOLDOWN.setdefault(
+            key, {"fails": 0, "until": 0.0, "reason": ""}
+        )
+        record["fails"] = int(record.get("fails") or 0) + 1
+        if kind == "dead":
+            seconds = _LLM_COOLDOWN_DEAD
+        elif kind == "auth":
+            seconds = max(_LLM_COOLDOWN_STEPS[-1], 3600)
+        else:
+            index = min(record["fails"] - 1, len(_LLM_COOLDOWN_STEPS) - 1)
+            seconds = _LLM_COOLDOWN_STEPS[index]
+        record["until"] = time.time() + seconds
+        record["reason"] = (error_text or "")[:200]
+    return seconds
+
+
+def llm_model_cooldown_remaining(model: str) -> int:
+    """Seconds left before *model* may be retried again (0 when healthy)."""
+    key = (model or "").strip()
+    if not key:
+        return 0
+    with _LLM_MODEL_COOLDOWN_LOCK:
+        record = _LLM_MODEL_COOLDOWN.get(key)
+        if not record:
+            return 0
+        remaining = float(record.get("until") or 0.0) - time.time()
+    return int(remaining) if remaining > 0 else 0
+
+
+def clear_llm_model_cooldown(model: str) -> None:
+    """Reset the failure ladder for *model* after a successful call."""
+    key = (model or "").strip()
+    if not key:
+        return
+    with _LLM_MODEL_COOLDOWN_LOCK:
+        _LLM_MODEL_COOLDOWN.pop(key, None)
 
 
 class _LiteLLMStreamError(RuntimeError):
@@ -3662,6 +3780,32 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
         models_to_try = [m for m in models_to_try if m]
 
+        # Health gate: skip models that recently failed hard (quota exhausted,
+        # model removed, auth rejected). If everything is cooling we still try
+        # them all -- a degraded attempt beats returning nothing.
+        _attempt_models: List[str] = []
+        _cooling_models: List[Tuple[str, int]] = []
+        for _candidate in models_to_try:
+            _remaining = llm_model_cooldown_remaining(_candidate)
+            if _remaining > 0:
+                _cooling_models.append((_candidate, _remaining))
+            else:
+                _attempt_models.append(_candidate)
+        if not _attempt_models:
+            logger.warning(
+                "[LiteLLM] all %d model(s) are cooling down; ignoring cooldown and retrying anyway",
+                len(models_to_try),
+            )
+            models_to_attempt = list(models_to_try)
+        else:
+            if _cooling_models:
+                logger.info(
+                    "[LiteLLM] skipping %d model(s) in cooldown: %s",
+                    len(_cooling_models),
+                    ", ".join(f"{name}({secs}s left)" for name, secs in _cooling_models),
+                )
+            models_to_attempt = _attempt_models
+
         use_channel_router = self._has_channel_config(config)
 
         last_error = None
@@ -3671,8 +3815,12 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
         last_usage: Dict[str, Any] = {}
         effective_system_prompt = system_prompt or self.TEXT_SYSTEM_PROMPT
         router_model_names = set(get_configured_llm_models(config.llm_model_list))
-        for model in models_to_try:
+        for model in models_to_attempt:
             last_model = model
+            # Reset per-attempt: a leftover error from the previous model used to
+            # leak into the quota check below and abort this model's non-stream
+            # retry for the wrong reason.
+            last_error = None
             origins = route_deployment_origins(config.llm_model_list, model)
             model_stream = bool(stream and not origins.has_hermes)
             recovery_model_list = config.llm_model_list
@@ -3806,6 +3954,10 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                             model,
                             safe_error,
                         )
+                        # Keep the error attribution local to this model. Without
+                        # this, the quota check below reused the previous model's
+                        # exception (observed: glm-5.2 reported a Gemini 429).
+                        last_error = RuntimeError(f"{type(exc).__name__}: {safe_error}")
 
                 if _stream_text is not None:
                     last_response_text = _stream_text
@@ -3818,6 +3970,7 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                     last_usage = _stream_usage
                     if response_validator is not None:
                         response_validator(_stream_text)
+                    clear_llm_model_cooldown(model)
                     return _stream_text, model, _stream_usage
 
                 # Quota check: skip non-stream fallback if stream error was quota/rate-limit/503
@@ -3886,6 +4039,7 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                     last_usage = usage
                     if response_validator is not None:
                         response_validator(content)
+                    clear_llm_model_cooldown(model)
                     return (content, actual_model, usage)
                 raise ValueError("LLM returned empty response")
 
@@ -3902,7 +4056,16 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                         last_provider = router_provider
                 safe_error = self._sanitize_litellm_exception_text(e, config=config, model=model)
                 logger.warning("[LiteLLM] %s failed: %s", model, safe_error)
-                last_error = RuntimeError(f"{type(e).__name__}: {safe_error}")
+                error_text = f"{type(e).__name__}: {safe_error}"
+                last_error = RuntimeError(error_text)
+                _cooldown_seconds = mark_llm_model_unhealthy(model, error_text)
+                if _cooldown_seconds:
+                    logger.warning(
+                        "[LiteLLM] %s marked unhealthy for %ss (%s); later stocks will skip it",
+                        model,
+                        _cooldown_seconds,
+                        _llm_error_kind(error_text),
+                    )
                 continue
 
         raise _AllModelsFailedError(
