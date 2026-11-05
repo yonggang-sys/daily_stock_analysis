@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# 与上游同步，自动化解 runner 版本冲突。
+# 与上游同步，确定性地解决 runner 版本冲突。
 #
 # 为什么需要这个脚本
 # ------------------
-# 本仓把 9 个 workflow 全量钉在 ubuntu-26.04，上游倾向 ubuntu-latest / ubuntu-24.04。
+# 本仓把 20 个 ubuntu job 全量钉在 ubuntu-26.04，上游倾向 ubuntu-latest / ubuntu-24.04。
 # 双方改的是同一行 `runs-on:`，Git 必然冲突；而 GitHub 网页的「Sync fork」遇到
 # **任何**冲突就整体拒绝，表现成「无法自动合并」（哪怕只冲突一行）。
 #
-# 本脚本绕开网页按钮，流程：
-#   1. 探针合并，摸清冲突面
-#   2. 冲突只在 .github/workflows/ → 用 `git merge -X ours` 把冲突块判给本仓
-#      （非冲突块照常吸收上游改动，不会丢上游修复）
-#   3. check_ci_runners.py --fix 兜底：连上游新增的 ubuntu-latest job 也纠正为 26.04
-#   4. 断言本仓自定义补丁仍在（AI 自选股注入、模型熔断、失败原因摘要）
-#   5. 可选推送
+# 解法：不用网页按钮，改用本脚本。对「本仓只改过 runner 的文件」，直接取上游
+# 完整版本（上游改动一字不丢），再用 check_ci_runners.py 把 runner 统一回 26.04。
+#
+# 为什么不用 `git merge -X ours`
+# ------------------------------
+# 实测（/tmp/mt3）：`-X ours` 会把冲突 hunk 邻近的上游行改动一起判给本仓。
+# 例：上游同时改了 `runs-on` 和紧邻的 `OTHER: v1 -> v2`，-X ours 后 OTHER 退回 v1，
+# 上游修复被静默丢弃。本脚本的 --theirs + 回注没有这个问题（已实测 OTHER 保留 v2）。
 #
 # 用法
 # ----
@@ -25,7 +26,7 @@
 #   UPSTREAM_BRANCH  默认 main
 #   ORIGIN_REMOTE    默认 origin
 #   PUSH=1           合并后推送
-#   PYTHON           指定解释器
+#   PYTHON           指定解释器（默认 python3）
 
 set -euo pipefail
 
@@ -41,7 +42,18 @@ PYTHON="${PYTHON:-python3}"
 UP_REF="${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+warn() { printf '\033[33m!  %s\033[0m\n' "$*"; }
 die() { printf '\n\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+# 该路径在本仓相对 merge-base 的改动，是否只有 runs-on 行。
+is_runner_only() {
+    local file="$1"
+    local mb nonrunner
+    mb="$(git merge-base HEAD "$UP_REF")"
+    nonrunner="$(git diff "$mb"..HEAD -- "$file" 2>/dev/null \
+        | grep '^[+-]' | grep -v '^+++' | grep -v '^---' | grep -v 'runs-on:' | wc -l | tr -d ' ')"
+    [ "$nonrunner" = "0" ]
+}
 
 # ---------- 0. 前置检查 ----------
 say "0/6 前置检查"
@@ -65,47 +77,67 @@ if [ "$BEHIND" -eq 0 ]; then
 fi
 echo "  上游领先 $BEHIND 个提交"
 
-# ---------- 2. 探针合并：摸清冲突面 ----------
-say "2/6 探针合并（不落地）"
+# ---------- 2. 合并 ----------
+say "2/6 合并"
 set +e
-git merge --no-commit --no-ff "$UP_REF" >/tmp/sync_probe.log 2>&1
-PROBE_RC=$?
+git merge --no-commit --no-ff "$UP_REF" >/tmp/sync_merge.log 2>&1
+MERGE_RC=$?
 set -e
 
 CONFLICTS="$(git diff --name-only --diff-filter=U || true)"
-if [ "$PROBE_RC" -eq 0 ] && [ -z "$CONFLICTS" ]; then
-    echo "  无冲突，直接提交合并。"
+if [ "$MERGE_RC" -eq 0 ] && [ -z "$CONFLICTS" ]; then
+    echo "  零冲突，直接提交。"
     git commit --no-edit --quiet
-    MERGED_STRATEGY="clean"
+    STRATEGY="clean"
 else
     echo "  冲突文件："
     printf '    %s\n' $CONFLICTS
-    NON_WORKFLOW="$(printf '%s\n' "$CONFLICTS" | grep -v '^\.github/workflows/' || true)"
-    git merge --abort
-    if [ -n "$NON_WORKFLOW" ]; then
-        printf '\n\033[31m✗ 冲突不只在 workflow，需人工判断：\033[0m\n'
-        printf '    %s\n' $NON_WORKFLOW
-        die "已 abort，仓库未改动。请手工 git merge $UP_REF 处理上述文件。"
-    fi
-    say "2b/6 冲突仅在 workflow，用 -X ours 重合并（冲突块判给本仓）"
-    git merge -X ours --no-edit "$UP_REF"
-    MERGED_STRATEGY="-X ours"
-fi
-echo "  合并方式：$MERGED_STRATEGY"
+    ALL_OK=1
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        case "$f" in
+            .github/workflows/*.yml|.github/workflows/*.yaml)
+                if is_runner_only "$f"; then
+                    git checkout --theirs -- "$f"
+                    git add -- "$f"
+                    echo "  ✓ $f 本仓只改过 runner → 取上游完整版本，稍后回注 26.04"
+                else
+                    warn "$f 含本仓自定义改动（非 runner），不能简单取上游"
+                    ALL_OK=0
+                fi
+                ;;
+            *)
+                warn "$f 不在 .github/workflows/，可能涉及业务逻辑"
+                ALL_OK=0
+                ;;
+        esac
+    done <<< "$CONFLICTS"
 
-# ---------- 3. runner 版本兜底 ----------
+    if [ "$ALL_OK" -ne 1 ]; then
+        git merge --abort
+        die "已 abort，仓库未改动。请手工 git merge $UP_REF 处理上面标记的文件。"
+    fi
+
+    say "2b/6 回注统一 runner"
+    "$PYTHON" scripts/check_ci_runners.py --fix
+    git add .github/workflows
+    git commit --no-edit --quiet
+    STRATEGY="theirs + 回注"
+fi
+echo "  合并方式：$STRATEGY"
+
+# ---------- 3. runner 版本兜底（含上游新增的 job） ----------
 say "3/6 统一 runner 版本"
-if "$PYTHON" scripts/check_ci_runners.py --fix; then
-    if [ -n "$(git status --porcelain)" ]; then
-        git add .github/workflows
-        git commit --quiet -m "ci: 同步上游后统一 runner 至 ubuntu-26.04
+"$PYTHON" scripts/check_ci_runners.py --fix
+if [ -n "$(git status --porcelain)" ]; then
+    git add .github/workflows
+    git commit --quiet -m "ci: 同步上游后统一 runner 至 ubuntu-26.04
 
 由 scripts/sync_upstream.sh 自动追加：上游新增/修改的 job 若使用
 ubuntu-latest 或 ubuntu-24.04，在此统一纠正，避免与 26.04 锁定策略漂移。"
-        echo "  已追加一条 runner 对齐提交。"
-    else
-        echo "  无需改写。"
-    fi
+    echo "  已追加一条 runner 对齐提交。"
+else
+    echo "  无需改写。"
 fi
 
 # ---------- 4. 断言本仓自定义补丁仍在 ----------
@@ -128,7 +160,11 @@ assert_grep src/notification.py "_brief_failure_reason" "摘要行失败原因"
 
 if [ -f config/ai_targets.json ]; then
     N=$("$PYTHON" -c "import json;print(len(json.load(open('config/ai_targets.json',encoding='utf-8')).get('targets') or []))" 2>/dev/null || echo 0)
-    if [ "$N" -gt 0 ]; then printf '  ✓ ai_targets.json 有 %s 只标的\n' "$N"; else printf '  ✗ ai_targets.json targets 为空\n'; FAIL=1; fi
+    if [ "$N" -gt 0 ]; then
+        printf '  ✓ ai_targets.json 有 %s 只标的\n' "$N"
+    else
+        printf '  ✗ ai_targets.json targets 为空\n'; FAIL=1
+    fi
 else
     printf '  ✗ config/ai_targets.json 缺失\n'; FAIL=1
 fi
@@ -160,7 +196,7 @@ for b in bad:
 sys.exit(1 if bad else 0)
 PY
 
-"$PYTHON" -m py_compile main.py ci_emit.py src/analyzer.py src/config.py src/notification.py 2>&1 | head -5
+"$PYTHON" -m py_compile main.py ci_emit.py src/analyzer.py src/config.py src/notification.py
 echo "  ✓ py_compile 通过"
 
 # ---------- 6. 推送 ----------
