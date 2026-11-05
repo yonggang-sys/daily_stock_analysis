@@ -46,10 +46,16 @@ def iter_workflow_files() -> list[Path]:
     return [f for f in files if f.is_file()]
 
 
+def _read_lines(path: Path) -> list[str]:
+    """按原样读取行，保留每行自己的 EOL（LF / CRLF 都不动）。"""
+    with open(path, "r", encoding="utf-8", newline="") as fh:
+        return fh.readlines()
+
+
 def scan(path: Path, expect: str, fix: bool) -> tuple[list[str], bool]:
     """返回 (问题列表, 是否被改写)。"""
     problems: list[str] = []
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = _read_lines(path)
     changed = False
 
     for idx, line in enumerate(lines, start=1):
@@ -57,8 +63,14 @@ def scan(path: Path, expect: str, fix: bool) -> tuple[list[str], bool]:
         if stripped.startswith("#"):
             continue
 
+        # 关键：正则只匹配「去掉行尾符后的正文」，改写时再把原行尾符拼回去。
+        # 早期版本直接拿整行（含 EOL）去替换，rest 捕获不到换行符，导致 LF 文件
+        # 被改写的行与下一行粘成一行（CRLF 文件因为 "\r" 被 .* 吃掉而侥幸没事）。
+        body = line.rstrip("\r\n")
+        eol = line[len(body):]
+
         for regex in (_SCALAR_RE, _ITEM_RE):
-            m = regex.match(line)
+            m = regex.match(body)
             if not m:
                 continue
             value = m.group("value")
@@ -72,13 +84,13 @@ def scan(path: Path, expect: str, fix: bool) -> tuple[list[str], bool]:
             rel = path.relative_to(REPO_ROOT).as_posix()
             problems.append(f"{rel}:{idx}  {value}  ->  {expect}")
             if fix:
-                newline = m.group("indent") + expect + m.group("rest")
-                lines[idx - 1] = newline
+                lines[idx - 1] = m.group("indent") + expect + m.group("rest") + eol
                 changed = True
             break
 
     if changed:
-        path.write_text("".join(lines), encoding="utf-8", newline="")
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write("".join(lines))
     return problems, changed
 
 
