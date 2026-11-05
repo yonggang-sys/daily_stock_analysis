@@ -244,10 +244,13 @@ jobs:
 
   web-gate:
     name: web-gate
-    # 保持 ubuntu-24.04：本 job 会执行 `npx playwright install --with-deps chromium`，
-    # 而 playwright 尚无 ubuntu-26.04 的 chromium 构建（上游 bc32270a 同因修正）。
-    # 其余 job 仍按 8ae2d15 钉在 ubuntu-26.04。
-    runs-on: ubuntu-24.04
+    # 全仓统一 ubuntu-26.04（`ubuntu-latest` 已于 2026-10-19~11-19 迁移至 26.04）。
+    # 上游 bc32270a 曾把本 job 降到 24.04，理由是 playwright 缺 26.04 的 chromium；
+    # 该限制只存在于 @playwright/test<=1.58.x（nativeDeps 无 ubuntu26.04 表）。
+    # 本项目已升级到 ^1.64.1，其 nativeDeps 含完整 ubuntu26.04-x64 依赖表
+    # （含 libasound2t64/libatk1.0-0t64 等 t64 包名）与 chromium 下载地址，
+    # 故 `npx playwright install --with-deps chromium` 可在 26.04 正常执行。
+    runs-on: ubuntu-26.04
     needs: [changes, ai-governance]
     if: needs.changes.outputs.frontend == 'true'
     defaults:
