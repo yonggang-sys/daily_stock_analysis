@@ -2952,12 +2952,17 @@ class SearchService:
             self._providers.append(SerpAPISearchProvider(serpapi_keys))
             logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
 
-        # 5. MiniMax（Coding Plan Web Search，结构化结果）
+        # 5. Anspire Search（可选，位于 SerpAPI 之后）
+        if anspire_keys:
+            self._providers.append(AnspireSearchProvider(anspire_keys))
+            logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
+
+        # 6. MiniMax（Coding Plan Web Search，结构化结果）
         if minimax_keys:
             self._providers.append(MiniMaxSearchProvider(minimax_keys))
             logger.info(f"已配置 MiniMax 搜索，共 {len(minimax_keys)} 个 API Key")
 
-        # 6. SearXNG（自建实例优先；未配置时可自动发现公共实例）
+        # 7. SearXNG（自建实例优先；未配置时可自动发现公共实例）
         searxng_provider = SearXNGSearchProvider(
             searxng_base_urls,
             use_public_instances=bool(searxng_public_instances_enabled and not searxng_base_urls),
@@ -2970,12 +2975,7 @@ class SearchService:
             else:
                 logger.info("已启用 SearXNG 公共实例自动发现模式")
 
-        # 7. Anspire Search（实时智能搜索优化）
-        if anspire_keys:
-            self._providers.insert(0, AnspireSearchProvider(anspire_keys))
-            logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
-
-        # 0. DirectNews（零 Key 直连源，最高优先级，置于链最前、优先于 Anspire）
+        # 0. DirectNews（零 Key 直连源，最高优先级，置于链最前）
         #    NEWS_DIRECT_ENABLED=false 时禁用；不依赖任何 API Key。
         #    direct_news_enabled=False 时整体关闭（单测无 provider 退化路径用）。
         # 仅当未配置任何 Key 型 provider 时才由零 Key 的 DirectNews 领航降级链：

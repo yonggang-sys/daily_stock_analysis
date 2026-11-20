@@ -117,8 +117,10 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         self.assertEqual(config.market_review_region, "cn,us,kr")
 
     def test_market_review_region_keeps_legacy_mixed_both_and_empty_token_compatibility(self) -> None:
-        self.assertEqual(Config._parse_market_review_region("both,us"), "cn,hk,us,jp,kr")
+        self.assertEqual(Config._parse_market_review_region("both,us"), "cn,hk,us,jp,kr,tw")
         self.assertEqual(Config._parse_market_review_region("cn,,us"), "cn,us")
+        self.assertEqual(Config._parse_market_review_region("TW"), "tw")
+        self.assertEqual(Config._parse_market_review_region("tw,cn,invalid"), "cn,tw")
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
@@ -392,7 +394,7 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
             "OPENAI_MODEL": "gpt-4.1",
             "OPENAI_BASE_URL": "https://openai.example.com/v1",
             "OPENAI_API_KEY": "base-key-12345",
-            "LITELLM_FALLBACK_MODELS": "openai/gpt-5.5,openai/gpt-4o-mini",
+            "LITELLM_FALLBACK_MODELS": "openai/gpt-6.1-sol,openai/gpt-4o-mini",
             "VISION_MODEL": "openai/gpt-4o-mini",
         }
         with patch.dict(os.environ, base_env, clear=True):
@@ -552,8 +554,8 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
             os.environ,
             {
                 "STOCK_LIST": "600519",
-                "LITELLM_MODEL": "openai/gpt-5.5",
-                "OPENAI_MODEL": "gpt-5.5",
+                "LITELLM_MODEL": "openai/gpt-6.1-sol",
+                "OPENAI_MODEL": "gpt-6.1-sol",
                 "OPENAI_API_KEY": "sk-openai-test",
                 "OPENAI_BASE_URL": "https://openai.example/v1",
                 "NEWS_INTEL_RETENTION_DAYS": "14",
@@ -566,8 +568,8 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         ):
             config = Config._load_from_env()
 
-        self.assertEqual(config.litellm_model, "openai/gpt-5.5")
-        self.assertEqual(config.openai_model, "gpt-5.5")
+        self.assertEqual(config.litellm_model, "openai/gpt-6.1-sol")
+        self.assertEqual(config.openai_model, "gpt-6.1-sol")
         self.assertEqual(config.openai_base_url, "https://openai.example/v1")
         self.assertEqual(config.news_intel_retention_days, 14)
         self.assertEqual(config.news_intel_fetch_timeout_sec, 12.0)
@@ -975,8 +977,8 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
                 "\n".join(
                     [
                         "STOCK_LIST=600519",
-                        "LITELLM_MODEL=openai/gpt-5.5",
-                        "OPENAI_MODEL=gpt-5.5",
+                        "LITELLM_MODEL=openai/gpt-6.1-sol",
+                        "OPENAI_MODEL=gpt-6.1-sol",
                         "OPENAI_API_KEY=runtime-openai-key",
                         "OPENAI_BASE_URL=https://openai.example/v1",
                         "CUSTOM_WEBHOOK_BODY_TEMPLATE={\"title\":$$title_json,\"content\":$$content_json}",
@@ -995,8 +997,8 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
             ):
                 config = Config._load_from_env()
 
-        self.assertEqual(config.litellm_model, "openai/gpt-5.5")
-        self.assertEqual(config.openai_model, "gpt-5.5")
+        self.assertEqual(config.litellm_model, "openai/gpt-6.1-sol")
+        self.assertEqual(config.openai_model, "gpt-6.1-sol")
         self.assertEqual(config.openai_api_key, "runtime-openai-key")
         self.assertEqual(config.openai_base_url, "https://openai.example/v1")
         self.assertEqual(
@@ -1054,7 +1056,7 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         )
         self.assertEqual(
             Config._parse_market_review_region("both"),
-            "cn,hk,us,jp,kr",
+            "cn,hk,us,jp,kr,tw",
         )
 
     @patch("src.config.setup_env")
@@ -1127,6 +1129,48 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         stocks, emails = config.stock_email_groups[0]
         self.assertEqual(stocks, ["600519", "HK01810"])
         self.assertEqual(emails, ["user@example.com"])
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_env_example_has_no_nonempty_xxxx_placeholders_or_false_feishu_warnings(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ) -> None:
+        from dotenv import dotenv_values
+
+        env_example_path = Path(__file__).resolve().parents[1] / ".env.example"
+        parsed = dotenv_values(env_example_path)
+        bad_keys = [k for k, v in parsed.items() if (v or "").strip().lower() == "xxxx"]
+        self.assertEqual(bad_keys, [], f"Unexpected fake placeholder values in .env.example: {bad_keys}")
+
+        clean_env = {k: v for k, v in parsed.items() if v is not None}
+        clean_env["GEMINI_API_KEY"] = "test-gemini-key-123456"
+        clean_env["STOCK_LIST"] = "600519"
+        with patch.dict(os.environ, clean_env, clear=True):
+            cfg = Config._load_from_env()
+            issues = cfg.validate_structured()
+
+        feishu_warnings = [
+            i for i in issues
+            if i.severity == "warning" and "FEISHU_APP_ID" in i.message
+        ]
+        self.assertEqual(feishu_warnings, [])
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_missing_llm_config_issue_mentions_modelflare_key(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ) -> None:
+        with patch.dict(os.environ, {"STOCK_LIST": "600519"}, clear=True):
+            cfg = Config._load_from_env()
+            issues = cfg.validate_structured()
+
+        llm_errors = [i for i in issues if i.severity == "error" and i.field == "LITELLM_CONFIG"]
+        self.assertTrue(llm_errors)
+        self.assertIn("MODELFLARE_KEY", llm_errors[0].message)
 
 
 if __name__ == "__main__":

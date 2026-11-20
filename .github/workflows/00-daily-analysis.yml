@@ -593,6 +593,19 @@ jobs:
           # 如果有 TickFlow 或 Tushare Pro，可按权限把 tickflow / tushare 放在更靠前位置
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
           
+          LLM_X6AI_PROTOCOL: ${{ vars.LLM_X6AI_PROTOCOL || secrets.LLM_X6AI_PROTOCOL }}
+          LLM_X6AI_API_SURFACE: ${{ vars.LLM_X6AI_API_SURFACE || secrets.LLM_X6AI_API_SURFACE }}
+          LLM_X6AI_BASE_URL: ${{ vars.LLM_X6AI_BASE_URL || secrets.LLM_X6AI_BASE_URL }}
+          LLM_X6AI_API_KEY: ${{ secrets.LLM_X6AI_API_KEY }}
+          LLM_X6AI_API_KEYS: ${{ secrets.LLM_X6AI_API_KEYS }}
+          LLM_X6AI_MODELS: ${{ vars.LLM_X6AI_MODELS || secrets.LLM_X6AI_MODELS }}
+          LLM_X6AI_ENABLED: ${{ vars.LLM_X6AI_ENABLED || secrets.LLM_X6AI_ENABLED }}
+          LLM_X6AI_EXTRA_HEADERS: ${{ vars.LLM_X6AI_EXTRA_HEADERS || secrets.LLM_X6AI_EXTRA_HEADERS }}
+          TICKPLUS_API_KEY: ${{ secrets.TICKPLUS_API_KEY }}
+          TICKPLUS_PRIORITY: ${{ vars.TICKPLUS_PRIORITY || secrets.TICKPLUS_PRIORITY }}
+          FXMACRODATA_API_KEY: ${{ secrets.FXMACRODATA_API_KEY }}
+          MX_APIKEY: ${{ secrets.MX_APIKEY }}
+          MX_PRIORITY: ${{ vars.MX_PRIORITY || secrets.MX_PRIORITY }}
         run: |
           # 零 LLM 模式：未配置任何 LLM 密钥时跳过主分析
           # （secrets 上下文不可用于 step if 条件 → 改在 run 内判断 env 注入值；

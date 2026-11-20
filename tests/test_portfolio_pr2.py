@@ -181,6 +181,60 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertEqual(first_hash["duplicate_count"], 1)
         self.assertEqual(second_hash["inserted_count"], 0)
 
+    def test_csv_rejects_non_finite_numbers_before_any_write(self) -> None:
+        aid = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")["id"]
+        header = "成交日期,证券代码,买卖标志,成交数量,成交均价,手续费,印花税"
+        fields = {"quantity": 3, "price": 4, "手续费": 5, "印花税": 6}
+        for field, index in fields.items():
+            for token in ("Infinity", "-inf", "NaN", "+NaN", "1e309"):
+                row = ["2026-01-02", "000001", "买入", "10", "100", "0", "0"]
+                row[index] = token
+                # A valid first row must not be partially committed when a
+                # later row fails numeric validation.
+                content = (header + "\n2026-01-02,600519,买入,10,100,0,0\n" + ",".join(row) + "\n").encode()
+                for endpoint, dry_run in (("parse", True), ("commit", True), ("commit", False)):
+                    with self.subTest(field=field, token=token, endpoint=endpoint, dry_run=dry_run):
+                        resp = self.client.post(
+                            f"/api/v1/portfolio/imports/csv/{endpoint}",
+                            data={"broker": "huatai", "account_id": aid, "dry_run": str(dry_run).lower()},
+                            files={"file": ("trades.csv", content, "text/csv")},
+                        )
+                        self.assertEqual(resp.status_code, 400, resp.text)
+                        self.assertIn(f"CSV row 3: {field} must be finite", resp.json()["message"])
+        self.assertEqual(self.service.list_trade_events(account_id=aid)["total"], 0)
+
+    def test_csv_rejects_overflow_in_combined_fees_and_taxes(self) -> None:
+        for columns, field in (("手续费,佣金", "fee"), ("印花税,税费", "tax")):
+            with self.subTest(field=field):
+                content = ("成交日期,证券代码,买卖标志,成交数量,成交均价," + columns
+                           + "\n2026-01-02,600519,买入,10,100,1e308,1e308\n").encode()
+                with self.assertRaisesRegex(ValueError, f"CSV row 2: {field} must be finite"):
+                    self.import_service.parse_trade_csv(broker="huatai", content=content)
+
+    def test_import_records_reject_non_finite_numbers_in_dry_run_and_commit(self) -> None:
+        aid = self.service.create_account(name="Main", broker="Demo", market="cn", base_currency="CNY")["id"]
+        record = self.import_service.parse_trade_csv(broker="huatai", content=self._csv_bytes())["records"][0]
+        for field in ("quantity", "price", "fee", "tax"):
+            for value in (float("inf"), float("-inf"), float("nan")):
+                for dry_run in (True, False):
+                    with self.subTest(field=field, value=value, dry_run=dry_run):
+                        result = self.import_service.commit_trade_records(
+                            account_id=aid, broker="huatai", records=[{**record, field: value}], dry_run=dry_run,
+                        )
+                        self.assertEqual(result["inserted_count"], 0)
+                        self.assertEqual(result["failed_count"], 1)
+                        self.assertIn(f"{field} must be finite", result["errors"][0])
+        self.assertEqual(self.service.list_trade_events(account_id=aid)["total"], 0)
+
+    def test_csv_accepts_finite_scientific_notation_and_blank_optional_fees(self) -> None:
+        content = ("成交日期,证券代码,买卖标志,成交数量,成交均价,手续费,印花税\n"
+                   '2026-01-02,000001,买入,"1,000",1e2,,0\n').encode()
+        parsed = self.import_service.parse_trade_csv(broker="huatai", content=content)
+        self.assertEqual(parsed["record_count"], 1)
+        record = parsed["records"][0]
+        self.assertEqual(record["symbol"], "000001")
+        self.assertEqual((record["quantity"], record["price"], record["fee"], record["tax"]), (1000, 100, 0, 0))
+
     def test_import_side_parser_avoids_false_sell_match(self) -> None:
         csv_text = (
             "成交日期,证券代码,买卖标志,成交数量,成交均价,成交编号\n"
@@ -904,6 +958,131 @@ class PortfolioPr2TestCase(unittest.TestCase):
         self.assertIn("sector_concentration", payload)
         self.assertIn("drawdown", payload)
         self.assertIn("stop_loss", payload)
+
+
+class PortfolioRiskBoardCacheTestCase(unittest.TestCase):
+    """Sector lookups should not hit the rate-limited provider on every risk request."""
+
+    def setUp(self) -> None:
+        PortfolioRiskService.clear_belong_boards_cache_for_tests()
+        self.addCleanup(PortfolioRiskService.clear_belong_boards_cache_for_tests)
+
+    @staticmethod
+    def _new_service(manager: MagicMock) -> PortfolioRiskService:
+        portfolio_service = MagicMock()
+        portfolio_service.convert_amount.side_effect = lambda *, amount, **_kwargs: (amount, False, "")
+        service = PortfolioRiskService(
+            repo=MagicMock(),
+            portfolio_service=portfolio_service,
+            decision_signal_service=MagicMock(),
+            config=SimpleNamespace(),
+        )
+        service._data_manager = manager
+        return service
+
+    @staticmethod
+    def _snapshot() -> dict:
+        return {
+            "total_market_value": 300.0,
+            "accounts": [
+                {
+                    "market": "cn",
+                    "base_currency": "CNY",
+                    "positions": [
+                        {"symbol": "600519", "market": "cn", "market_value_base": 200.0},
+                        {"symbol": "600036", "market": "cn", "market_value_base": 100.0},
+                    ],
+                }
+            ],
+        }
+
+    def test_sector_lookups_are_reused_by_later_requests(self) -> None:
+        boards = {
+            "600519": [{"name": "白酒", "type": "行业"}],
+            "600036": [{"name": "银行", "type": "行业"}],
+        }
+        manager = MagicMock()
+        manager.get_belong_boards.side_effect = lambda symbol: [dict(item) for item in boards[symbol]]
+
+        # The risk endpoint builds a new service for every request.
+        results = [
+            self._new_service(manager)._build_sector_concentration(
+                self._snapshot(), 50.0, as_of_date=date(2026, 1, 1)
+            )
+            for _ in range(2)
+        ]
+
+        for result in results:
+            self.assertEqual([row["sector"] for row in result["top_sectors"]], ["白酒", "银行"])
+            self.assertEqual(result["coverage"]["classified_count"], 2)
+        self.assertEqual(manager.get_belong_boards.call_count, 2)
+
+    def test_empty_belong_boards_are_not_cached(self) -> None:
+        manager = MagicMock()
+        manager.get_belong_boards.side_effect = [[], [{"name": "白酒", "type": "行业"}]]
+
+        self.assertEqual(self._new_service(manager)._fetch_belong_boards("600519"), [])
+        self.assertEqual(
+            self._new_service(manager)._fetch_belong_boards("600519"),
+            [{"name": "白酒", "type": "行业"}],
+        )
+        self.assertEqual(manager.get_belong_boards.call_count, 2)
+
+    def test_expired_belong_boards_are_fetched_again(self) -> None:
+        manager = MagicMock()
+        manager.get_belong_boards.side_effect = [
+            [{"name": "白酒", "type": "行业"}],
+            [{"name": "饮料制造", "type": "行业"}],
+        ]
+
+        with patch.object(PortfolioRiskService, "_BELONG_BOARDS_CACHE_TTL_SECONDS", -1):
+            self._new_service(manager)._fetch_belong_boards("600519")
+            boards = self._new_service(manager)._fetch_belong_boards("600519")
+
+        self.assertEqual(boards, [{"name": "饮料制造", "type": "行业"}])
+        self.assertEqual(manager.get_belong_boards.call_count, 2)
+
+    def test_failed_lookup_through_data_manager_is_retried(self) -> None:
+        from data_provider.base import DataFetcherManager
+
+        class _FlakyBoardFetcher:
+            name = "FlakyBoardFetcher"
+            priority = 1
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get_belong_board(self, stock_code: str) -> pd.DataFrame:
+                self.calls += 1
+                if self.calls == 1:
+                    raise ConnectionError("upstream timeout")
+                return pd.DataFrame({"板块名称": ["白酒"], "板块代码": ["BK0896"], "板块类型": ["行业"]})
+
+        fetcher = _FlakyBoardFetcher()
+        manager = DataFetcherManager(fetchers=[fetcher])
+
+        # The manager turns the provider error into an empty list; that must not be cached.
+        self.assertEqual(self._new_service(manager)._fetch_belong_boards("600519"), [])
+        retried = self._new_service(manager)._fetch_belong_boards("600519")
+        cached = self._new_service(manager)._fetch_belong_boards("600519")
+
+        self.assertEqual([board["name"] for board in retried], ["白酒"])
+        self.assertEqual(cached, retried)
+        self.assertEqual(fetcher.calls, 2)
+
+    def test_changing_returned_boards_does_not_change_the_cache(self) -> None:
+        manager = MagicMock()
+        manager.get_belong_boards.return_value = [{"name": "白酒", "type": "行业"}]
+
+        first = self._new_service(manager)._fetch_belong_boards("600519")
+        first[0]["name"] = "changed by caller"
+        first.append({"name": "extra", "type": "行业"})
+        hit = self._new_service(manager)._fetch_belong_boards("600519")
+        hit[0]["name"] = "changed again"
+        again = self._new_service(manager)._fetch_belong_boards("600519")
+
+        self.assertEqual(again, [{"name": "白酒", "type": "行业"}])
+        self.assertEqual(manager.get_belong_boards.call_count, 1)
 
 
 if __name__ == "__main__":
