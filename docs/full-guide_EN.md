@@ -679,6 +679,7 @@ python scripts/check_env.py --config
 
 ```bash
 python main.py                        # Full analysis (stocks + market review)
+python main.py --doctor               # Offline redacted config/LLM/notification/storage check (--json supported)
 python main.py --market-review        # Market review only
 python main.py --etf-rotation         # ETF rotation signal + rule backtest (no LLM; see docs/etf-rotation.md, Chinese-only)
 python main.py --no-market-review     # Stock analysis only
@@ -690,6 +691,8 @@ python main.py --schedule             # Scheduled task mode
 python main.py --debug                # Debug mode (verbose logging)
 python main.py --workers 5            # Specify concurrency
 ```
+
+> **`--doctor` semantics**: Both `python main.py --doctor` and `python main.py --doctor --json` run read-only offline diagnostics with secrets redacted (without creating log or database files). Exit codes: `0` when healthy or warnings only (e.g., having no notification channels configured is a warning, not a blocking error); `1` on blocking configuration, LLM, storage, or half-configured notification errors; `2` on flag misuse (`--json` requires `--doctor`).
 
 ### One-shot index analysis (Phase 1)
 
@@ -1526,6 +1529,8 @@ Backtesting triggers automatically after the daily analysis flow completes (non-
 ## Local WebUI Management Interface
 
 The WebUI and FastAPI API share the same service process. After startup, use the browser workspace for configuration management, manual analysis, task progress, historical reports, backtesting, portfolio management, and smart import. Authentication, cloud-server access, and API usage details are covered below.
+
+Smart Import accepts CSV and TXT watchlists saved as UTF-8 (with or without a byte-order mark), GBK, or UTF-16 (little- or big-endian with a byte-order mark).
 
 ### FastAPI API Service
 
