@@ -1554,12 +1554,21 @@ def _market_data(markdown_text: str, generated_on: date) -> MarketPoster:
                     )
                 )
 
-    catalyst_section = _section(markdown_text, "消息催化", "news catalysts", "뉴스 촉매")
+    # 自适应上游标题改名：旧「消息催化」保留，新增「资讯催化/消息面/重要消息」等变体；
+    # 词表扩展不改解析主流程，标题带 emoji（如「五、消息催化 ⚡」）仍由子串匹配覆盖。
+    catalyst_section = _section(
+        markdown_text, "消息催化", "资讯催化", "消息面", "重要消息",
+        "news catalysts", "news catalyst", "catalysts", "뉴스 촉매",
+    )
     poster.catalysts = [
         _compact_text(item, limit=34)
         for item in (_section_items(catalyst_section, limit=2) or _sentences(catalyst_section, limit=2))
     ]
-    plan_section = _section(markdown_text, "明日交易计划", "strategy plan", "outlook", "내일 거래 계획", "내일 계획")
+    # 自适应上游标题改名：新增「策略框架/交易计划/次日计划」等变体。
+    plan_section = _section(
+        markdown_text, "明日交易计划", "交易计划", "次日计划", "策略框架",
+        "strategy plan", "trading plan", "outlook", "내일 거래 계획", "내일 계획",
+    )
     poster.focus = _direction_items(
         _labeled_value(plan_section, "关注方向", "focus", "관심 방향", limit=220)
     )
@@ -1567,10 +1576,20 @@ def _market_data(markdown_text: str, generated_on: date) -> MarketPoster:
         _labeled_value(plan_section, "回避方向", "avoid", "회피 방향", limit=220)
     )
     poster.funds = _market_fund_metrics(markdown_text)
-    for label in ("结论", "仓位区间", "触发失效条件", "결론", "비중 구간", "무효화 조건"):
-        value = _labeled_value(plan_section, label, limit=86)
-        if value:
-            poster.plan.append(_compact_text(f"{label}：{value}", limit=32))
+    # 自适应上游字段改名：报告写「策略结论/仓位区间/失效条件」，旧代码只认
+    # 「结论/触发失效条件」，导致失效条件整项丢失。按「同义词组」匹配，
+    # 输出统一用报告原文标签（命中哪个写哪个），旧词继续兼容旧报告。
+    _plan_label_groups = (
+        ("结论", "策略结论", "核心结论", "整体策略", "总体策略", "결론"),
+        ("仓位区间", "仓位", "建议仓位", "仓位建议", "비중 구간"),
+        ("失效条件", "触发失效条件", "触发条件", "离场条件", "止损条件", "무효화 조건"),
+    )
+    for group in _plan_label_groups:
+        for label in group:
+            value = _labeled_value(plan_section, label, limit=86)
+            if value:
+                poster.plan.append(_compact_text(f"{label}：{value}", limit=32))
+                break
         if len(poster.plan) >= 3:
             break
     if not poster.plan:
