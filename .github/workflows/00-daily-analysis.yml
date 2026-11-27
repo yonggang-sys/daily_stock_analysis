@@ -2,8 +2,10 @@ name: 每日股票分析
 
 on:
   # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
-  schedule:
-    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+  # 【本 fork 已停用 schedule】统一由外部定时器通过 ci-trigger / repository_dispatch
+  # 触发 local-ci-reports.yml（本文件保留为上游兼容壳，仅手动触发）
+  # schedule:
+  #   - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
   
   # 手动触发
   workflow_dispatch:

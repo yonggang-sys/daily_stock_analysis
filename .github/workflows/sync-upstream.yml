@@ -10,7 +10,8 @@ name: Sync upstream
 # 因此本 workflow 只做三件事：定时跑脚本、成功推 main、失败开 issue 叫人。
 # 注意：用 GITHUB_TOKEN 推送不会触发其他 workflow（GitHub 的既定行为）。
 # 本仓 ci.yml 只监听 pull_request，local-ci-reports.yml 只监听 ci-trigger / repository_dispatch 路径
-# （00-daily-analysis.yml 已还原为上游原版，仅 GitHub schedule + 手动触发），
+# （00-daily-analysis.yml 已还原为上游兼容壳并注释 schedule，仅保留手动触发；
+#   定时产出完全由 local-ci-reports.yml 经外部定时器触发），
 # 所以推送 main 本来也不会误触发分析流水线，无需额外 PAT。
 
 on:
