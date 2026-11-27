@@ -10,7 +10,7 @@ from data_provider.tickplus_fetcher import TickPlusFetcher
 from src.config import Config
 
 
-WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/00-daily-analysis.yml'
+WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/local-ci-reports.yml'
 
 
 def _apply_actions_env(monkeypatch, *, tickplus='', tushare='', explicit=''):

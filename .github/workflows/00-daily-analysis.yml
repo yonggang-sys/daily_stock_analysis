@@ -1,22 +1,11 @@
 name: 每日股票分析
 
 on:
-  # ── 双保险触发（2026-09-09 起）────────────────────────────────────────────
-  # 外部可靠定时器(cron-job.org 等 SaaS，POST /dispatches 触发 repository_dispatch)
-  # 与 本机 WorkBuddy 自动化(ci_trigger.py → repository_dispatch / push ci-trigger)
-  # 同时触发同一样时段；任一方成功即产出报告，规避
-  # 「本机 WorkBuddy 会话/桌面端未活跃导致自动化被跳过」的单点失效。
-  # 不使用 GitHub 自带 schedule（尽力而为、会延迟/被停用），外部定时器统一走 cron-job.org。
-  # 去重：run 起步查 ci-reports 是否已有本时段新鲜报告，有则跳过主分析（见「去重检查」步）。
-  # 通道一（首选，需 PAT）：POST /repos/<owner>/<repo>/dispatches
-  #                         {"event_type":"daily-analysis","client_payload":{"slot":"pre|noon|close","mode":"full"}}
-  # 通道二（零凭据兜底）：  git push origin HEAD:ci-trigger
-  #                         时段写在提交信息里，如 "ci: trigger [slot=pre] 2026-09-08"
-  repository_dispatch:
-    types: [daily-analysis]
-  push:
-    branches: [ci-trigger]
-  # 手动触发（保留）：仍可产出 ci-reports，仪表盘数据源可控不断供
+  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  schedule:
+    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+  
+  # 手动触发
   workflow_dispatch:
     inputs:
       mode:
@@ -33,82 +22,27 @@ on:
         required: false
         default: false
         type: boolean
-      slot:
-        description: '触发时段（仅用于并发分组与产物标注）'
-        required: false
-        default: 'adhoc'
-        type: choice
-        options:
-          - pre      # 北京 08:30 - 盘前
-          - noon     # 北京 11:45 - 午盘复盘
-          - close    # 北京 15:30 - 收盘
-          - adhoc
 
-# 并发控制：按「事件 + 时段/分支」分组，外部三时点互不取消。
-# cancel-in-progress 由 true 改为 false：本作业历史最长跑到 1h05m，
-# 被新触发静默取消会表现为「以为触发了、实际没有产出」，是外部触发场景的典型陷阱。
+# 并发控制：同一时间只运行一个分析任务
 concurrency:
-  group: stock-analysis-${{ github.event_name }}-${{ github.event.client_payload.slot || github.event.inputs.slot || github.ref_name }}
+  group: stock-analysis
   cancel-in-progress: false
 
 jobs:
   analyze:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     # 兼容误将 STOCK_LIST 配到同名 Environment variables 的场景；
     # 推荐位置仍是 Settings -> Secrets and variables -> Actions -> Repository variables。
     environment: STOCK_LIST
-    # 添加超时限制，防止任务卡死；默认由 60 提到 90 —— 历史 #136/#137/#139 均跑到 1h05m
-    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '90') }}
-
-    # 发布步需要向 ci-reports 分支 push，故授予 contents: write
-    # （仅覆盖本作业所需权限；同作业内 upload-artifact 同运行上传仅需 contents: read，write 已含 read）
-    permissions:
-      contents: write
-
+    # 添加超时限制，防止任务卡死
+    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '30') }}
+    
     steps:
+      - name: 随机延迟（避免固定时间访问）
+        run: sleep $((RANDOM % 60))  # 随机延迟0-60秒启动
+      
       - name: 检出代码
         uses: actions/checkout@v5
-
-      - name: 随机延迟（避免固定时间访问）
-        # 由「checkout 之前、0-60s」改为「checkout 之后、0-15s」：
-        # 外部触发要求准点，原写法在检出前空转、白白占用 runner 时长
-        run: sleep 5
-      
-      - name: 去重检查（双触发保护）
-        # 外部定时器(cron-job.org 等 SaaS，POST /dispatches 触发 repository_dispatch)
-        # 与本机 WorkBuddy 自动化同时触发同一样时段时，避免两边都跑一遍主分析(耗 LLM 配额)。
-        # 逻辑：若 ci-reports 已有「今天且 90 分钟内」的新鲜报告，说明另一路触发已产出，本 run 跳过主分析。
-        # 网络/解析失败 → 不跳过（fail-open：宁多跑、不错过报告）。
-        run: |
-          set -uo pipefail
-          NOW=$(TZ='Asia/Shanghai' date +%s)
-          TODAY=$(TZ='Asia/Shanghai' date +%Y-%m-%d)
-          META_URL="https://raw.githubusercontent.com/${{ github.repository }}/ci-reports/reports/latest.meta.json"
-          if ! curl -fsSL --max-time 25 "$META_URL" -o /tmp/lm.json 2>/dev/null; then
-            echo "ℹ️ 无法获取 ci-reports meta（网络/首次），完整运行"; exit 0
-          fi
-          GEN=$(python3 -c "import json,sys;d=json.load(open('/tmp/lm.json'));print(d.get('generated_at',''))" 2>/dev/null || true)
-          if [ -z "$GEN" ]; then echo "ℹ️ meta 无 generated_at，完整运行"; exit 0; fi
-          # 2026-10-14(H-24)：手动 workflow_dispatch（验证/补跑）写入的 meta 不参与调度去重。
-          # 原逻辑只比时间戳，导致一次 stocks-only 手动验证 run 于 15:09 发布报告后，
-          # 15:30 收盘定时 run 被判「本时段已有新鲜报告」直接跳过主分析，收盘报告因此缺失大盘复盘。
-          # 手动 run 标记 trigger=workflow_dispatch，调度 run 见即放行；老 meta 无 trigger 字段时
-          # .get 返回空串 → 走原时间戳逻辑（向后兼容）。
-          TRIG=$(python3 -c "import json,sys;d=json.load(open('/tmp/lm.json'));print(d.get('trigger',''))" 2>/dev/null || true)
-          if [ "$TRIG" = "workflow_dispatch" ]; then
-            echo "🖐️ meta 来自手动触发(trigger=workflow_dispatch)，不参与调度去重，完整运行"
-            exit 0
-          fi
-          GEN_DAY=${GEN:0:10}
-          GEN_TS=$(TZ='Asia/Shanghai' date -d "${GEN}" +%s 2>/dev/null || echo 0)
-          DIFF=$(( (NOW - GEN_TS) / 60 ))
-          echo "🕒 现在(北京)=$TODAY / meta.generated_at=$GEN / ${DIFF}分钟前"
-          if [ "$GEN_DAY" = "$TODAY" ] && [ "$DIFF" -ge 0 ] && [ "$DIFF" -le 90 ]; then
-            echo "⏭️ 本时段已有 ${DIFF} 分钟前新鲜报告，跳过主分析与取数"
-            touch SKIP_ANALYSIS
-          else
-            echo "✅ 无新鲜报告，完整运行"
-          fi
       
       - name: 设置 Python 环境
         uses: actions/setup-python@v6
@@ -118,93 +52,15 @@ jobs:
       
       - name: 安装依赖
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
           python -c "import futu; print('✅ futu SDK import OK')"
       
       - name: 创建必要目录
         run: |
-          mkdir -p data logs reports .cache
-
-      - name: 恢复新闻缓存（跨 run 持久化）
-        # DirectNewsSearchProvider 将上次成功抓取的新闻写入 data/news_cache.json；
-        # 从 ci-reports 分支拉回上一 run 的缓存，作为本次抓取的兜底/续接，实现跨 run 持久化。
-        # 首次运行或缓存缺失时静默跳过，不影响主流程。
-        run: |
-          mkdir -p data
-          CACHE_URL="https://raw.githubusercontent.com/${{ github.repository }}/ci-reports/data/news_cache.json"
-          if curl -fsSL --max-time 25 "$CACHE_URL" -o data/news_cache.json 2>/dev/null; then
-            echo "✅ 已从 ci-reports 恢复新闻缓存（$(wc -c < data/news_cache.json) bytes）"
-          else
-            echo "ℹ️ 无历史新闻缓存（首次运行/缓存缺失），将全新抓取"
-            rm -f data/news_cache.json
-          fi
-
-      - name: 设置日期与触发时段环境变量
-        env:
-          PAYLOAD_SLOT: ${{ github.event.client_payload.slot }}
-          INPUT_SLOT: ${{ github.event.inputs.slot }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
-        run: |
-          echo "TODAY=$(date +%Y%m%d)" >> $GITHUB_ENV
-          # 时段优先级：repository_dispatch payload > workflow_dispatch input > push 提交信息 [slot=xxx] > adhoc
-          # pre=北京08:30盘前 / noon=北京11:45午盘 / close=北京15:30收盘
-          SLOT="$PAYLOAD_SLOT"
-          [ -z "$SLOT" ] && SLOT="$INPUT_SLOT"
-          if [ -z "$SLOT" ] && [ -n "$COMMIT_MSG" ]; then
-            SLOT="$(printf '%s' "$COMMIT_MSG" | sed -n 's/.*\[slot=\([a-zA-Z0-9_-]*\)\].*/\1/p')"
-          fi
-          [ -z "$SLOT" ] && SLOT="adhoc"
-          echo "RUN_SLOT=$SLOT" >> $GITHUB_ENV
-          # 新闻搜索总开关：盘中(noon=11:45)跳过以省 Tavily 等按次计费额度；
-          # 盘前(pre)/收盘(close)/adhoc(手动)均启用。导出到 $GITHUB_ENV 全步骤可见。
-          if [ "$SLOT" = "noon" ]; then
-            NEWS_ENABLED="false"
-          else
-            NEWS_ENABLED="true"
-          fi
-          echo "NEWS_SEARCH_ENABLED=$NEWS_ENABLED" >> $GITHUB_ENV
-          echo "触发时段: $SLOT（事件: ${{ github.event_name }}）/ 新闻搜索(News): $NEWS_ENABLED"
-
-      - name: 恢复数据缓存
-        uses: actions/cache@v5
-        with:
-          path: |
-            data/
-            .cache/
-          key: stock-data-${{ env.TODAY }}
-          restore-keys: |
-            stock-data-
-
-      - name: Key 连通性预检
-        run: |
-          echo "=========================================="
-          echo "🔑 LLM Key 配置检查"
-          echo "=========================================="
-          python -c "
-          import os
-          keys = {
-            'Gemini': os.getenv('GEMINI_API_KEY'),
-            'DeepSeek': os.getenv('DEEPSEEK_API_KEY'),
-            'OpenAI': os.getenv('OPENAI_API_KEY'),
-            'Anthropic': os.getenv('ANTHROPIC_API_KEY'),
-            'AIHubMix': os.getenv('AIHUBMIX_KEY'),
-            'LiteLLM': os.getenv('LITELLM_API_KEY'),
-          }
-          configured = 0
-          for name, key in keys.items():
-            if key:
-              configured += 1
-              print(f'  {name}: ✅ 已配置')
-            else:
-              print(f'  {name}: ⚪ 未配置')
-          print(f'\n共 {configured}/{len(keys)} 个 key 已配置')
-          if configured == 0:
-            print('⚠️ 警告：未配置任何 LLM key')
-          "
+          mkdir -p data logs reports
       
       - name: 执行股票分析
-        # 零 LLM 模式：未配置任何 LLM 密钥时跳过主分析
-        # （secrets 上下文不可用于 step if 条件，改为在 run 内判断 env 注入的密钥值）
         env:
           # ==========================================
           # AI 配置
@@ -243,6 +99,14 @@ jobs:
           LLM_MODELFLARE_MODELS: ${{ vars.LLM_MODELFLARE_MODELS || secrets.LLM_MODELFLARE_MODELS }}
           LLM_MODELFLARE_ENABLED: ${{ vars.LLM_MODELFLARE_ENABLED || secrets.LLM_MODELFLARE_ENABLED }}
           LLM_MODELFLARE_EXTRA_HEADERS: ${{ vars.LLM_MODELFLARE_EXTRA_HEADERS || secrets.LLM_MODELFLARE_EXTRA_HEADERS }}
+          LLM_X6AI_PROTOCOL: ${{ vars.LLM_X6AI_PROTOCOL || secrets.LLM_X6AI_PROTOCOL }}
+          LLM_X6AI_API_SURFACE: ${{ vars.LLM_X6AI_API_SURFACE || secrets.LLM_X6AI_API_SURFACE }}
+          LLM_X6AI_BASE_URL: ${{ vars.LLM_X6AI_BASE_URL || secrets.LLM_X6AI_BASE_URL }}
+          LLM_X6AI_API_KEY: ${{ secrets.LLM_X6AI_API_KEY }}
+          LLM_X6AI_API_KEYS: ${{ secrets.LLM_X6AI_API_KEYS }}
+          LLM_X6AI_MODELS: ${{ vars.LLM_X6AI_MODELS || secrets.LLM_X6AI_MODELS }}
+          LLM_X6AI_ENABLED: ${{ vars.LLM_X6AI_ENABLED || secrets.LLM_X6AI_ENABLED }}
+          LLM_X6AI_EXTRA_HEADERS: ${{ vars.LLM_X6AI_EXTRA_HEADERS || secrets.LLM_X6AI_EXTRA_HEADERS }}
           # Hermes 是本地 loopback generation preset；API Key 只从 Secrets 注入。
           # GitHub-hosted runner 的 127.0.0.1 不是用户电脑，本配置通常只适合 self-hosted runner。
           LLM_HERMES_PROTOCOL: ${{ vars.LLM_HERMES_PROTOCOL || secrets.LLM_HERMES_PROTOCOL }}
@@ -255,9 +119,9 @@ jobs:
           # Gemini AI（主选）
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
-          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
-          GEMINI_REQUEST_DELAY: ${{ vars.GEMINI_REQUEST_DELAY || '0.5' }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3.6-flash' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-3.5-flash-lite' }}
+          GEMINI_REQUEST_DELAY: '3.0'
           
           # AIHubMix（优先于 OPENAI_API_KEY，自动适配 base_url，推荐国内用户）
           AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}
@@ -275,7 +139,7 @@ jobs:
           # Anthropic / Claude
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_API_KEYS: ${{ secrets.ANTHROPIC_API_KEYS }}
-          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || secrets.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022' }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || secrets.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
 
           # LLM 渠道模式（常见渠道名需显式映射，GitHub Actions 不会自动导入任意 Secret/Variable）
           LLM_PRIMARY_PROTOCOL: ${{ vars.LLM_PRIMARY_PROTOCOL || secrets.LLM_PRIMARY_PROTOCOL }}
@@ -412,6 +276,7 @@ jobs:
           LLM_OPENROUTER_MODELS: ${{ vars.LLM_OPENROUTER_MODELS || secrets.LLM_OPENROUTER_MODELS }}
           LLM_OPENROUTER_ENABLED: ${{ vars.LLM_OPENROUTER_ENABLED || secrets.LLM_OPENROUTER_ENABLED }}
           LLM_OPENROUTER_EXTRA_HEADERS: ${{ vars.LLM_OPENROUTER_EXTRA_HEADERS || secrets.LLM_OPENROUTER_EXTRA_HEADERS }}
+
           LLM_REQUESTY_PROTOCOL: ${{ vars.LLM_REQUESTY_PROTOCOL || secrets.LLM_REQUESTY_PROTOCOL }}
           LLM_REQUESTY_API_SURFACE: ${{ vars.LLM_REQUESTY_API_SURFACE || secrets.LLM_REQUESTY_API_SURFACE }}
           LLM_REQUESTY_BASE_URL: ${{ vars.LLM_REQUESTY_BASE_URL || secrets.LLM_REQUESTY_BASE_URL }}
@@ -436,7 +301,10 @@ jobs:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
           # Tushare Pro 自定义接入地址（可选；指向自建网关或第三方兼容镜像时设置）
           TUSHARE_HTTP_URL: ${{ vars.TUSHARE_HTTP_URL || secrets.TUSHARE_HTTP_URL }}
-          # TickFlow（A 股日 K、实时行情、股票列表/名称与大盘复盘增强；不设则走免费源 fallback）
+          # TickPlus（A 股 / ETF 首选推荐；日 K、实时指标与名称；未配置则使用其他来源）
+          TICKPLUS_API_KEY: ${{ secrets.TICKPLUS_API_KEY }}
+          TICKPLUS_PRIORITY: ${{ vars.TICKPLUS_PRIORITY || secrets.TICKPLUS_PRIORITY }}
+          # TickFlow（保留独立能力与历史配置；含指数和大盘复盘增强）
           TICKFLOW_API_KEY: ${{ secrets.TICKFLOW_API_KEY }}
           TICKFLOW_PRIORITY: ${{ vars.TICKFLOW_PRIORITY || secrets.TICKFLOW_PRIORITY }}
           TICKFLOW_KLINE_ADJUST: ${{ vars.TICKFLOW_KLINE_ADJUST || secrets.TICKFLOW_KLINE_ADJUST }}
@@ -456,6 +324,8 @@ jobs:
           LONGBRIDGE_ENABLE_OVERNIGHT: ${{ vars.LONGBRIDGE_ENABLE_OVERNIGHT || secrets.LONGBRIDGE_ENABLE_OVERNIGHT }}
           LONGBRIDGE_PUSH_CANDLESTICK_MODE: ${{ vars.LONGBRIDGE_PUSH_CANDLESTICK_MODE || secrets.LONGBRIDGE_PUSH_CANDLESTICK_MODE }}
           LONGBRIDGE_PRINT_QUOTE_PACKAGES: ${{ vars.LONGBRIDGE_PRINT_QUOTE_PACKAGES || secrets.LONGBRIDGE_PRINT_QUOTE_PACKAGES }}
+          # FXMacroData（Agent 宏观数据工具的可选授权；不设则仅使用公开 USD 数据）
+          FXMACRODATA_API_KEY: ${{ secrets.FXMACRODATA_API_KEY }}
           
           # ==========================================
           # 搜索服务
@@ -471,11 +341,9 @@ jobs:
           BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
           SEARXNG_BASE_URLS: ${{ vars.SEARXNG_BASE_URLS || secrets.SEARXNG_BASE_URLS }}
           SEARXNG_PUBLIC_INSTANCES_ENABLED: ${{ vars.SEARXNG_PUBLIC_INSTANCES_ENABLED || secrets.SEARXNG_PUBLIC_INSTANCES_ENABLED }}
-          # [zhulinsen新增] SearXNG 超时配置
           SEARXNG_TIMEOUT_SECONDS: ${{ vars.SEARXNG_TIMEOUT_SECONDS || secrets.SEARXNG_TIMEOUT_SECONDS }}
-          # [时段开关] 盘中(noon=11:45)置 false 以省 Tavily 等按次计费额度；
-          # 盘前/收盘/手动(adhooc)置 true。由「设置日期与触发时段环境变量」步按 RUN_SLOT 写入 $GITHUB_ENV。
-          NEWS_SEARCH_ENABLED: ${{ env.NEWS_SEARCH_ENABLED }}
+          MX_APIKEY: ${{ secrets.MX_APIKEY }}
+          MX_PRIORITY: ${{ vars.MX_PRIORITY || secrets.MX_PRIORITY }}
           
           # ==========================================
           # 通知渠道（可同时配置多个，全部推送）
@@ -585,63 +453,24 @@ jobs:
           # 系统配置
           # ==========================================
           LOG_LEVEL: INFO
-          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '3' }}
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '1' }}
+          PER_STOCK_TIMEOUT_SECONDS: ${{ vars.PER_STOCK_TIMEOUT_SECONDS || secrets.PER_STOCK_TIMEOUT_SECONDS }}
           # 筹码分布：默认 false（云端接口不稳定）；需启用时在 Settings → Variables 添加 ENABLE_CHIP_DISTRIBUTION=true
           ENABLE_CHIP_DISTRIBUTION: ${{ vars.ENABLE_CHIP_DISTRIBUTION || secrets.ENABLE_CHIP_DISTRIBUTION || 'false' }}
-          # 实时行情数据源优先级（腾讯有量比且稳定，推荐首选）
-          # 可选值: tencent, akshare_sina, efinance, akshare_em, tickflow, tushare
-          # 如果有 TickFlow 或 Tushare Pro，可按权限把 tickflow / tushare 放在更靠前位置
-          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+          # 实时行情数据源优先级（未设置时由运行时按已配置的 Key 自动选择）
+          # 可选值: tickplus, tencent, akshare_sina, efinance, akshare_em, tickflow, tushare
+          # 推荐 TickPlus；未显式配置顺序时，TICKPLUS_API_KEY 自动启用 tickplus 优先。
+          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY }}
           
-          LLM_X6AI_PROTOCOL: ${{ vars.LLM_X6AI_PROTOCOL || secrets.LLM_X6AI_PROTOCOL }}
-          LLM_X6AI_API_SURFACE: ${{ vars.LLM_X6AI_API_SURFACE || secrets.LLM_X6AI_API_SURFACE }}
-          LLM_X6AI_BASE_URL: ${{ vars.LLM_X6AI_BASE_URL || secrets.LLM_X6AI_BASE_URL }}
-          LLM_X6AI_API_KEY: ${{ secrets.LLM_X6AI_API_KEY }}
-          LLM_X6AI_API_KEYS: ${{ secrets.LLM_X6AI_API_KEYS }}
-          LLM_X6AI_MODELS: ${{ vars.LLM_X6AI_MODELS || secrets.LLM_X6AI_MODELS }}
-          LLM_X6AI_ENABLED: ${{ vars.LLM_X6AI_ENABLED || secrets.LLM_X6AI_ENABLED }}
-          LLM_X6AI_EXTRA_HEADERS: ${{ vars.LLM_X6AI_EXTRA_HEADERS || secrets.LLM_X6AI_EXTRA_HEADERS }}
-          TICKPLUS_API_KEY: ${{ secrets.TICKPLUS_API_KEY }}
-          TICKPLUS_PRIORITY: ${{ vars.TICKPLUS_PRIORITY || secrets.TICKPLUS_PRIORITY }}
-          FXMACRODATA_API_KEY: ${{ secrets.FXMACRODATA_API_KEY }}
-          MX_APIKEY: ${{ secrets.MX_APIKEY }}
-          MX_PRIORITY: ${{ vars.MX_PRIORITY || secrets.MX_PRIORITY }}
         run: |
-          # 零 LLM 模式：未配置任何 LLM 密钥时跳过主分析
-          # （secrets 上下文不可用于 step if 条件 → 改在 run 内判断 env 注入值；
-          #  选股/热点等结构化产出由 ci_emit 步独立产出，不依赖此步）
-          if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "${LITELLM_API_KEY:-}" ] \
-             && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${DEEPSEEK_API_KEY:-}" ] \
-             && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${AIHUBMIX_KEY:-}" ]; then
-            echo "ℹ️ 零 LLM 模式：未配置 LLM 密钥，跳过主分析（选股由 ci_emit 独立产出）"
-            exit 0
-          fi
-
-          # 解析自选股配置（优先级：仓库文件 > Variables/Secrets > 默认值）：
-          # 0. 【2026-10-22 新增】config/ai_targets.json
-          #    由仪表盘「AI 报告标的池 → 保存并同步」写入；存在且 targets 非空时以它为准，
-          #    使前端保存即时生效，无需再改 Secret。解析失败/为空则静默回退到下面 1/2/3。
+          # 解析自选股配置：
           # 1. Repository/Environment secrets 或 Repository variables（STOCK_LIST_CONFIG）
           # 2. 同名 Environment variables 注入的 runner 环境变量（STOCK_LIST）
           # 3. 最小默认值
-          AI_TARGETS_FILE="config/ai_targets.json"
-          AI_TARGETS_USED=0
-          if [ -f "$AI_TARGETS_FILE" ]; then
-            AI_TARGETS_CSV=$(python3 -c "import json;d=json.load(open('$AI_TARGETS_FILE'));print(','.join(str(x) for x in (d.get('targets') or [])))" 2>/dev/null || true)
-            if [ -n "${AI_TARGETS_CSV:-}" ]; then
-              export STOCK_LIST="$AI_TARGETS_CSV"
-              AI_TARGETS_USED=1
-              echo "🎯 自选股来源: $AI_TARGETS_FILE（$(printf '%s\n' "$AI_TARGETS_CSV" | tr ',' '\n' | wc -l) 只）"
-            else
-              echo "⚠️ $AI_TARGETS_FILE 为空或解析失败，回退 Variables/Secrets"
-            fi
-          fi
-          if [ "$AI_TARGETS_USED" = "0" ]; then
-            if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
-              export STOCK_LIST="$STOCK_LIST_CONFIG"
-            elif [ -z "${STOCK_LIST:-}" ]; then
-              export STOCK_LIST="600519"
-            fi
+          if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
+            export STOCK_LIST="$STOCK_LIST_CONFIG"
+          elif [ -z "${STOCK_LIST:-}" ]; then
+            export STOCK_LIST="600519"
           fi
 
           # 处理 LITELLM YAML 配置文件
@@ -655,7 +484,7 @@ jobs:
           fi
 
           # 判断运行模式
-          MODE="${{ github.event.client_payload.mode || github.event.inputs.mode || 'full' }}"
+          MODE="${{ github.event.inputs.mode || 'full' }}"
           
           echo "=========================================="
           echo "🚀 A股自选股智能分析系统"
@@ -684,7 +513,9 @@ jobs:
           echo ""
           echo "【数据源】"
           echo "  Tushare Token: $([ -n "$TUSHARE_TOKEN" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  TickPlus (recommended): $([ -n "$TICKPLUS_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  TickFlow:      $([ -n "$TICKFLOW_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
+          echo "  FXMacroData:   $([ -n "$FXMACRODATA_API_KEY" ] && echo '✅ 已配置' || echo '⚪ 未配置（仅公开 USD 数据）')"
           if [ -n "$LONGBRIDGE_APP_KEY" ] && [ -n "$LONGBRIDGE_APP_SECRET" ] && [ -n "$LONGBRIDGE_ACCESS_TOKEN" ]; then
             echo "  Longbridge: ✅ 已配置（Legacy API Key）"
           elif [ -n "$LONGBRIDGE_OAUTH_CLIENT_ID" ] || { [ -n "$LONGBRIDGE_APP_KEY" ] && [ -z "$LONGBRIDGE_ACCESS_TOKEN" ]; }; then
@@ -696,7 +527,6 @@ jobs:
           echo "【搜索引擎】"
           echo "  Bocha API Keys: $([ -n "$BOCHA_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  Tavily API Keys: $([ -n "$TAVILY_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
-          echo "  新闻搜索总开关(NEWS_SEARCH_ENABLED): ${NEWS_SEARCH_ENABLED:-true}（noon 时段禁用以省按次额度）"
           echo "  SerpAPI Keys: $([ -n "$SERPAPI_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  MiniMax API Keys: $([ -n "$MINIMAX_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
           echo "  Brave API Keys: $([ -n "$BRAVE_API_KEYS" ] && echo '✅ 已配置' || echo '⚪ 未配置')"
@@ -706,7 +536,7 @@ jobs:
               echo "  SearXNG Public Instances: ❌ 已禁用"
               ;;
             "")
-              echo "  SearXNG Public Instances: ❌ 已禁用（未配置，默认关闭）"
+              echo "  SearXNG Public Instances: ⚪ 默认关闭（公共实例普遍限流，如需启用请显式设为 true）"
               ;;
             *)
               echo "  SearXNG Public Instances: ✅ 已启用"
@@ -729,56 +559,19 @@ jobs:
           
           # 构建命令行参数
           FORCE_RUN_ARG=""
-          if [ "${{ github.event.client_payload.force_run || github.event.inputs.force_run }}" = "true" ]; then
+          if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
             FORCE_RUN_ARG="--force-run"
             echo "⚡ 已启用强制运行模式（跳过交易日检查）"
           fi
 
-          # 检查今日是否已有成功产物，避免重复全量分析
-          TODAY=$(date +%Y%m%d)
-          if [ -f "reports/.analysis_done" ] && [ "$(cat reports/.analysis_done)" = "$TODAY" ]; then
-            echo "✅ 今日分析产物已存在，跳过重复执行"
-            ls -lh reports/report_*.md 2>/dev/null || true
-            exit 0
+          # 执行分析
+          if [ "$MODE" = "market-only" ]; then
+            python main.py --market-review $FORCE_RUN_ARG
+          elif [ "$MODE" = "stocks-only" ]; then
+            python main.py --no-market-review $FORCE_RUN_ARG
+          else
+            python main.py $FORCE_RUN_ARG
           fi
-
-          # 双触发去重：本机自动化已产出本时段新鲜报告则跳过（避免重复烧 LLM 配额）
-          if [ -f SKIP_ANALYSIS ]; then
-            echo "⏭️ 去重：本时段已有另一路触发产出的新鲜报告，跳过主分析"
-            exit 0
-          fi
-
-          # 执行分析（3次尝试，间隔递增）
-          for attempt in 1 2 3; do
-            echo ""
-            echo "=========================================="
-            echo "🚀 执行分析 - 尝试 $attempt/3"
-            echo "=========================================="
-            
-            ANALYSIS_OK=0
-            if [ "$MODE" = "market-only" ]; then
-              python main.py --market-review $FORCE_RUN_ARG && ANALYSIS_OK=1
-            elif [ "$MODE" = "stocks-only" ]; then
-              python main.py --no-market-review $FORCE_RUN_ARG && ANALYSIS_OK=1
-            else
-              python main.py $FORCE_RUN_ARG && ANALYSIS_OK=1
-            fi
-            
-            if [ "$ANALYSIS_OK" = "1" ]; then
-              echo "$TODAY" > reports/.analysis_done
-              echo "✅ 分析成功，已标记完成"
-              exit 0
-            fi
-            
-            if [ $attempt -lt 3 ]; then
-              WAIT=$((60 * attempt))
-              echo "⏳ 等待 ${WAIT} 秒后重试..."
-              sleep $WAIT
-            fi
-          done
-          
-          echo "❌ 分析在3次尝试后均失败"
-          exit 1
       
       - name: 上传分析报告
         uses: actions/upload-artifact@v6
@@ -789,123 +582,7 @@ jobs:
             reports/
             logs/
           retention-days: 30
-
-      - name: CI 取数产出（选股/热点/资金流）
-        # 沙箱屏蔽东财 clist/push2his，本地无法复现；GitHub Runner 出网无屏蔽，在此产出。
-        # 零 LLM 模式：main.py 可能在无 key 时跳过，此处始终运行以产出选股 reco.json。
-        if: always()
-        id: ci_emit
-        env:
-          # 网络优化：超时、重试、连接池、缓存 TTL
-          HTTP_TIMEOUT: ${{ vars.HTTP_TIMEOUT || '30' }}
-          HTTP_RETRY_TOTAL: ${{ vars.HTTP_RETRY_TOTAL || '3' }}
-          HTTP_RETRY_BACKOFF: ${{ vars.HTTP_RETRY_BACKOFF || '2' }}
-          HTTP_POOL_CONNECTIONS: ${{ vars.HTTP_POOL_CONNECTIONS || '20' }}
-          HTTP_POOL_MAXSIZE: ${{ vars.HTTP_POOL_MAXSIZE || '30' }}
-          CACHE_TTL_SECONDS: ${{ vars.CACHE_TTL_SECONDS || '300' }}
-          # 异步并发（ci_emit.py 若支持则读取）
-          MAX_CONCURRENT_REQUESTS: ${{ vars.MAX_CONCURRENT_REQUESTS || '10' }}
-        run: |
-          set -euo pipefail
-          # 双触发去重：本机自动化已产出本时段新鲜报告则跳过取数
-          if [ -f SKIP_ANALYSIS ]; then
-            echo "⏭️ 去重：本时段已有另一路触发产出的新鲜报告，跳过取数"
-            exit 0
-          fi
-          for attempt in 1 2 3; do
-            echo "ci_emit 尝试 $attempt/3..."
-            python ci_emit.py && break
-            if [ $attempt -lt 3 ]; then
-              WAIT=$((60 * attempt))
-              echo "⏳ 等待 ${WAIT} 秒后重试..."
-              sleep ${WAIT}
-            fi
-          done
-          echo "✅ ci_emit 完成（reco/hotspot/holding_fundflow/latest.meta）"
       
-      - name: CI 取数失败告警
-        if: steps.ci_emit.outcome == 'failure'
-        run: |
-          echo "⚠️ CI 取数产出失败，选股/热点/资金流数据可能缺失"
-          echo "请检查 ci_emit 日志"
-
-      - name: 发布报告 + 结构化 JSON 到 ci-reports 分支（供本地仪表盘免 token 拉取）
-        # 零 LLM 模式：发布门槛不再强依赖 LLM 报告(report_*.md)；
-        # 只要 ci_emit 产出的结构化 JSON(reco.json 等) 存在即发布，保证选股结论持续更新。
-        if: always()
-        env:
-          CI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3-flash-preview' }}
-        run: |
-          set -euo pipefail
-          LATEST=$(ls -t reports/report_*.md 2>/dev/null | head -1) || true
-          # 收集 ci_emit 结构化产物（零 LLM，独立产出）
-          EMIT_FILES=""
-          for f in reco.json hotspot_leaders.json holding_fundflow.json; do
-            if [ -s "$f" ]; then EMIT_FILES="$EMIT_FILES $f"; fi
-          done
-          if [ -z "$LATEST" ] && [ -z "$EMIT_FILES" ]; then
-            echo "⚠️ 无 LLM 报告且无结构化 JSON，跳过发布"
-            exit 0
-          fi
-          # 发布 LLM 报告（若有）
-          if [ -n "$LATEST" ]; then
-            cp "$LATEST" reports/latest.md
-            printf '{"generated_at":"%s","model":"%s","run_number":"%s","source":"%s","trigger":"%s"}\n' \
-              "$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" \
-              "${CI_MODEL}" \
-              "${{ github.run_number }}" \
-              "$LATEST" \
-              "${{ github.event_name }}" > reports/latest.meta.json
-          else
-            # 零 LLM 模式：用当前时间生成 meta，标记无 LLM 模型
-            printf '{"generated_at":"%s","model":"%s","run_number":"%s","source":"%s","trigger":"%s"}\n' \
-              "$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" \
-              "n/a(ci-emit-only)" \
-              "${{ github.run_number }}" \
-              "ci_emit" \
-              "${{ github.event_name }}" > reports/latest.meta.json
-          fi
-
-          # H-23(2026-09-30)：大盘复盘单独发布——本地仪表盘「AI 复盘报告」七章节消费此文件。
-          # 此前只发布 report_*.md（个股决策仪表盘报告），market_review_*.md 虽已生成却不发布，
-          # 仪表盘取到的正文里根本没有「大盘复盘」章节，七章节只能退化为规则引擎短句。
-          MR=$(ls -t reports/market_review_*.md 2>/dev/null | head -1) || true
-          if [ -n "$MR" ]; then
-            cp "$MR" reports/market_review_latest.md
-            MR_DATE=$(basename "$MR" .md | sed 's/market_review_//')
-            printf '{"date":"%s","source":"%s","run_number":"%s","generated_at":"%s"}\n' \
-              "$MR_DATE" "$MR" "${{ github.run_number }}" \
-              "$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')" > reports/market_review_latest.meta.json
-            echo "✅ 大盘复盘已发布: $MR"
-          else
-            echo "ℹ️ 本次无 market_review_*.md，跳过"
-          fi
-
-          # 使用孤儿分支仅含产物，避免 force-push 整个仓库（含 .github/workflows）触发
-          # GitHub 对 workflow 文件的写权限要求（GITHUB_TOKEN 默认仅有 contents:write）。
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git switch --orphan ci-publish
-          git rm -rf --cached . >/dev/null 2>&1 || true
-          if [ -f reports/latest.md ]; then git add -f reports/latest.md; fi
-          git add -f reports/latest.meta.json
-          # H-23：大盘复盘产物（缺失不阻断发布）
-          if [ -f reports/market_review_latest.md ]; then git add -f reports/market_review_latest.md; fi
-          if [ -f reports/market_review_latest.meta.json ]; then git add -f reports/market_review_latest.meta.json; fi
-          # 方案A 产物（ci_emit 产出；缺失则跳过，不阻断发布）
-          for f in reco.json hotspot_leaders.json holding_fundflow.json; do
-            if [ -f "$f" ]; then git add -f "$f"; fi
-          done
-          # 跨 run 持久化：新闻缓存（DirectNewsSearchProvider 兜底用；缺失不阻断发布）
-          if [ -f data/news_cache.json ]; then git add -f data/news_cache.json; fi
-          if git diff --cached --quiet; then
-            echo "📭 无内容变化，跳过提交"
-          else
-            git commit -m "publish analysis artifacts (run ${{ github.run_number }})"
-            git push -f origin ci-publish:refs/heads/ci-reports
-            echo "✅ 已发布到 ci-reports 分支（纯产物，无 workflow，无需 workflows 权限）"
-          fi
-
       - name: 显示运行结果
         if: always()
         run: |
@@ -924,21 +601,3 @@ jobs:
             echo "📜 最近日志（最后 30 行）:"
             tail -30 logs/stock_analysis_*.log 2>/dev/null || echo "无日志"
           fi
-
-  notify-on-failure:
-    runs-on: ubuntu-26.04
-    needs: analyze
-    if: failure()
-    steps:
-      - name: 任务失败通知
-        run: |
-          echo "=========================================="
-          echo "❌ 每日股票分析任务失败"
-          echo "=========================================="
-          echo "Run #${{ github.run_number }}"
-          echo "请检查 Actions 日志：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          echo "常见失败原因："
-          echo "  1. LLM API 限流/超时 → 检查是否有备用 key"
-          echo "  2. 数据源网络波动 → 已配置自动重试，仍失败请检查日志"
-          echo "  3. 配置缺失 → 检查 Secrets/Variables 设置"
-          echo "=========================================="

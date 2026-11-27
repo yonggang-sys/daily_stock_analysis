@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Static checks for notification env mappings in 00-daily-analysis.yml."""
+"""Static checks for notification env mappings in local-ci-reports.yml."""
 
 from pathlib import Path
 
@@ -19,7 +19,7 @@ from src.services.notification_diagnostics import (
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-WORKFLOW_PATH = ROOT_DIR / ".github/workflows/00-daily-analysis.yml"
+WORKFLOW_PATH = ROOT_DIR / ".github/workflows/local-ci-reports.yml"
 NOTIFICATIONS_DOC_PATH = ROOT_DIR / "docs/notifications.md"
 
 P0_EXCLUDED_BEHAVIOR_SWITCHES = {
@@ -34,7 +34,7 @@ def _load_daily_analysis_env() -> dict[str, str]:
     analyze_step = next((step for step in steps if step.get("name") == "执行股票分析"), None)
     available_step_names = [step.get("name", "<unnamed>") for step in steps]
     assert analyze_step is not None, (
-        "Expected 00-daily-analysis.yml job analyze to include a step named "
+        "Expected local-ci-reports.yml job analyze to include a step named "
         f"'执行股票分析'; available step names: {available_step_names}"
     )
     return analyze_step["env"]
